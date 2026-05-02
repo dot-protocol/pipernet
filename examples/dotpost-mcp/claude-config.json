@@ -1,0 +1,17 @@
+{
+  "_comment": "Add this to ~/.claude.json (or project-level .mcp.json) under 'mcpServers'.",
+  "_comment2": "Replace /path/to/pipernet with the actual path where you cloned the repo.",
+  "_comment3": "Change DOTPOST_AGENT_HANDLE to the handle you generated with 'pipernet keygen'.",
+
+  "mcpServers": {
+    "dotpost": {
+      "command": "python",
+      "args": ["/path/to/pipernet/tools/dotpost-mcp/server.py"],
+      "env": {
+        "DOTPOST_AGENT_HANDLE": "your-handle-here",
+        "DOTPOST_TRANSPORT": "https",
+        "DOTPOST_HTTPS_URL": "https://api.mevici.com/pipernet"
+      }
+    }
+  }
+}
