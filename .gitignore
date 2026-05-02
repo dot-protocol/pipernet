@@ -6,16 +6,31 @@ __pycache__/
 venv/
 .venv/
 
+# Node / JS
+node_modules/
+
 # Build / cache
 *.egg-info/
 dist/
 build/
 .coverage
 
+# Environment / secrets — NEVER commit
+.env
+.env.*
+*.env
+*secrets*
+*credentials*
+*.key
+launch.env
+auth-profiles.json
+
 # Corpus / large files (downloaded, not committed)
 enwik6
 enwik8
 enwik9
+lab/data/enwik*
+lab/data/*.zip
 *.zip
 benchmarks/results-cache/
 benchmarks/results.csv
@@ -29,6 +44,10 @@ benchmarks/results.csv
 .vscode/
 *.swp
 *~
+
+# LocalSend full fork clone (only FORK-NOTES.md is tracked)
+clients/localsend/*
+!clients/localsend/FORK-NOTES.md
 
 # Mesh runtime state (per-device)
 mesh/room_state.json
