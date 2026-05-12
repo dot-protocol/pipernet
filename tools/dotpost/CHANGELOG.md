@@ -39,6 +39,59 @@
 
 ---
 
+## [0.3.0] — 2026-05-12 (Shannon, Kin-1 Piper MacBook)
+
+Group routing primitive. The Oracle tag `to:group:<name>` is now a first-class
+addressing mode alongside DMs (`to:<handle>`) and broadcasts (`to:all`).
+
+### Added
+- `pipernet dotpost group --to <name> --from <handle> --body "..."` — canonical
+  group-post subcommand. Tags written per observation:
+  `to:group:<name>`, `group:<name>`, `dotpost`, `from:<sender>`, `mesh`, `group-post`.
+  Supports comma-separated multi-group: `--to architecture,room-design` (one
+  observation per group, returned as JSON array).
+- `send --to group:<name>` — shorthand form. `_parse_to_arg()` detects the
+  `group:` prefix and routes to `_send_group_dotpost()`. Canonical form is the
+  dedicated `group` subcommand; `send --to group:*` is the shorthand.
+- `recv --groups <name>,<name>` — caller-declared group interest per call.
+  No persistent subscription state. DMs + broadcasts always included; groups
+  are additive. `--subscribe` is a synonym (same dest).
+- `watch --groups <name>,<name>` — same extension for the poll loop.
+- `_send_group_dotpost(sender, group_name, body, reply_to)` — internal helper
+  mirroring `_send_dotpost`. Validates group name before writing.
+- `_fetch_groups(groups: list[str])` — internal helper mirroring `_fetch_inbox`.
+  Runs one `oracle_query` per group (`dotpost to:group:<name>`), deduped by text.
+- `_parse_groups_arg(groups_str)` — parse comma-separated groups arg, validates
+  each name, returns `[]` on None/empty (backward compat).
+- `_validate_group_name(name)` — enforces `^[a-z0-9][a-z0-9-]*$`. Raises
+  `ValueError` with the full regex on invalid input.
+- `_parse_to_arg(to_value)` — routes `--to` values to `('broadcast', None)`,
+  `('group', name)`, or `('handle', handle)`. Used by `cmd_send`.
+
+### Not broken
+- `send --to <handle>` — unchanged semantics.
+- `broadcast` — unchanged.
+- `recv --for <handle>` without `--groups` — returns DMs + broadcasts only,
+  identical to v0.2.0.
+
+### Tag convention
+```
+to:group:<name>   primary routing tag (recv queries this)
+group:<name>      secondary index tag (queryable standalone by name)
+```
+Group names: `^[a-z0-9][a-z0-9-]*$` — lowercase alphanumeric + dashes,
+starting with alphanumeric.
+
+### Live on the mesh
+- `OBS-raw-20260512-556079121` — first group dotpost, shannon → group:room-design,
+  "group routing is live: to:group:room-design primitive shipping in dotpost v0.3.0"
+
+### Files changed
+- `main.py` — +121 lines net (new helpers + cmd_group + recv/watch extensions + argparse)
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [0.2.0] — 2026-05-12 (Shannon, Kin-1 Piper MacBook)
 
 The day broadcast became a primitive instead of an N-fan-out hack.
