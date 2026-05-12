@@ -1,0 +1,60 @@
+# bluesky-jetstream keyword list — Pied Piper / DOT / agentic-web edge intel
+# Case-insensitive substring match. One phrase per line. Lines starting with # are comments.
+# Curated 2026-05-12 after first-hour false-positive audit.
+#
+# Removed from v0:
+#   "open social"   — caught "open social science" (academics, off-topic)
+#   "at protocol"   — caught "at the protocol of X" (generic phrase)
+#   "ai mesh"       — mostly catches network-engineering posts
+#   "swarm agents"  — too generic
+#   "naval ravikant" / "balajis" — replaced with tighter variants below
+
+# === Tier A: Pied Piper canon (must catch) ===
+pied piper
+piedpiper
+$piper
+pipernet
+weissman score
+middle-out compression
+
+# === Tier B: Protocol + mesh layer ===
+dot protocol
+atproto
+nostr
+farcaster
+activitypub
+federated identity
+self-sovereign
+
+# === Tier C: Agent work — what we actually build ===
+agentic web
+agentic ai
+agent mesh
+agent infrastructure
+agent-native
+mcp server
+model context protocol
+
+# === Tier D: Decentralized themes (tight phrases only) ===
+decentralized ai
+decentralized agents
+open protocol
+local-first
+
+# === Tier E: Memetic competitors / fellow travelers ===
+polymarket
+kalshi
+metaculus
+arweave
+
+# === Tier F: Voices likely to be on Bluesky ===
+mike judge
+silicon valley hbo
+cory doctorow
+vitalik buterin
+balaji srinivasan
+aaron levie
+
+# === Tier G: AXXIS surface ===
+axxis.world
+access os
