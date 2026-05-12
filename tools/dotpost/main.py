@@ -8,17 +8,22 @@ is the bus.
 
 Usage:
     pipernet dotpost send --to <handle> --body "<text>"   [--from <handle>]
+    pipernet dotpost broadcast --body "<text>"            [--from <handle>]
     pipernet dotpost recv [--for <handle>] [--since <iso>] [--limit 20]
     pipernet dotpost watch [--for <handle>] [--interval 30]
 
+A broadcast is just `--to all`. Receivers automatically pick up both
+their own DMs (`to:<me>`) and any `to:all` broadcasts in `recv` / `watch`.
+
 Each dotpost becomes a typed Oracle observation with:
     type    = "dotpost"
-    tags    = ["dotpost", "from:<sender>", "to:<recipient>"]
+    tags    = ["dotpost", "from:<sender>", "to:<recipient>"]   # or to:all
     content = the message body
     source  = "pipernet-mesh-<sender>"
 
-Other nodes — Loom, Janus, Jared, anyone — query Oracle for their tag
-and find their messages. The mesh routes through the brain.
+Other nodes — Loom, Janus, Jared, Shannon, Stewart, anyone — query
+Oracle for their tag and find their messages. The mesh routes through
+the brain.
 """
 from __future__ import annotations
 
@@ -34,15 +39,29 @@ from urllib.error import URLError, HTTPError
 
 
 ORACLE_BASE = os.getenv("ORACLE_BASE", "https://oracle.axxis.world")
+ORACLE_MCP_PATH = os.getenv("ORACLE_MCP_PATH", "/oracle/mcp/")
 
 
 def _oracle_token() -> str:
     """Get the Oracle V4 bearer token, in priority order."""
+    if t := os.getenv("ORACLE_TOKEN"):
+        return t
     if t := os.getenv("ORACLE_AUTH_TOKEN"):
         return t
     if t := os.getenv("TREE_AUTH_TOKEN"):
         return t
-    # Fall back to oracle_v3/.env — try a few likely paths
+    # Fall back to ~/.mcp.json (Claude Code MCP config — canonical source)
+    mcp_path = Path.home() / ".mcp.json"
+    if mcp_path.exists():
+        try:
+            cfg = json.loads(mcp_path.read_text())
+            oracle = cfg.get("mcpServers", {}).get("oracle", {})
+            auth = oracle.get("headers", {}).get("Authorization", "")
+            if auth.startswith("Bearer "):
+                return auth[len("Bearer "):]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    # Fall back to oracle_v3/.env
     candidates = [
         Path(__file__).resolve().parent.parent.parent.parent / "oracle_v3" / ".env",
         Path("/Users/blaze/Movies/Kin/oracle_v3/.env"),
@@ -54,7 +73,7 @@ def _oracle_token() -> str:
                 if line.startswith("ORACLE_AUTH_TOKEN="):
                     return line.split("=", 1)[1].strip()
     raise RuntimeError(
-        "Oracle token not found. Set ORACLE_AUTH_TOKEN env var or add it to oracle_v3/.env"
+        "Oracle token not found. Set ORACLE_TOKEN env var or check ~/.mcp.json"
     )
 
 
@@ -62,12 +81,13 @@ def _mcp_call(method: str, params: dict) -> dict:
     """Make an MCP JSON-RPC call against Oracle V4."""
     payload = {"jsonrpc": "2.0", "id": int(time.time() * 1000), "method": method, "params": params}
     req = Request(
-        f"{ORACLE_BASE}/mcp/",
+        f"{ORACLE_BASE.rstrip('/')}{ORACLE_MCP_PATH}",
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {_oracle_token()}",
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "User-Agent": "pipernet-dotpost/0.2 (+https://piedpiper.fun)",
         },
         method="POST",
     )
@@ -95,10 +115,17 @@ def _tool_call(tool_name: str, args: dict) -> dict:
         return {"text": text}
 
 
-def cmd_send(args: argparse.Namespace) -> int:
-    sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
-    recipient = args.to
-    body = args.body
+BROADCAST_HANDLE = "all"
+
+
+def _send_dotpost(sender: str, recipient: str, body: str) -> dict:
+    is_broadcast = recipient == BROADCAST_HANDLE
+    tags = ["dotpost", f"from:{sender}", f"to:{recipient}", "mesh"]
+    if is_broadcast:
+        tags.append("broadcast")
+        rationale = f"DOTpost broadcast from {sender} to all mesh agents"
+    else:
+        rationale = f"DOTpost from {sender} to {recipient} via mesh"
 
     payload = {
         "source": f"pipernet-mesh-{sender}",
@@ -107,38 +134,50 @@ def cmd_send(args: argparse.Namespace) -> int:
                 {
                     "content": body,
                     "type": "dotpost",
-                    "rationale": f"DOTpost from {sender} to {recipient} via mesh",
-                    "tags": [
-                        "dotpost",
-                        f"from:{sender}",
-                        f"to:{recipient}",
-                        "mesh",
-                    ],
+                    "rationale": rationale,
+                    "tags": tags,
                     "confidence": 0.95,
                 }
             ]
         },
     }
-    print(f"→ dotpost {sender}@mesh → {recipient} ({len(body)} chars)", file=sys.stderr)
-    result = _tool_call("oracle_ingest", payload)
+    arrow = "→ ALL" if is_broadcast else f"→ {recipient}"
+    print(f"{sender}@mesh {arrow} ({len(body)} chars)", file=sys.stderr)
+    return _tool_call("oracle_ingest", payload)
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
+    result = _send_dotpost(sender, args.to, args.body)
     print(json.dumps(result, indent=2))
     return 0
 
 
+def cmd_broadcast(args: argparse.Namespace) -> int:
+    sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
+    result = _send_dotpost(sender, BROADCAST_HANDLE, args.body)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _fetch_inbox(me: str) -> str:
+    """Fetch DMs (to:me) and broadcasts (to:all) in one shot, dedupe text."""
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for query in (f"dotpost to:{me}", f"dotpost to:{BROADCAST_HANDLE}"):
+        result = _tool_call("oracle_query", {"query": query, "type_filter": "dotpost"})
+        text = result.get("text") if "text" in result else json.dumps(result, indent=2)
+        if text and text not in seen:
+            seen.add(text)
+            label = "DM" if query.endswith(f":{me}") else "BROADCAST"
+            chunks.append(f"=== {label} ({query}) ===\n{text}")
+    return "\n\n".join(chunks) if chunks else "(no dotposts found)"
+
+
 def cmd_recv(args: argparse.Namespace) -> int:
     me = args.for_handle or os.getenv("PIPERNET_HANDLE", "rocky")
-    query = f"dotpost to:{me}"
-    print(f"→ querying Oracle for incoming dotposts to '{me}'", file=sys.stderr)
-    result = _tool_call(
-        "oracle_query",
-        {"query": query, "type_filter": "dotpost"},
-    )
-    # Oracle query result formats vary. Print the raw text for inspection;
-    # downstream tooling can parse if needed.
-    if "text" in result:
-        print(result["text"])
-    else:
-        print(json.dumps(result, indent=2))
+    print(f"→ inbox for '{me}' (DMs + broadcasts)", file=sys.stderr)
+    print(_fetch_inbox(me))
     return 0
 
 
@@ -146,18 +185,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     me = args.for_handle or os.getenv("PIPERNET_HANDLE", "rocky")
     interval = max(10, int(args.interval))
     print(
-        f"→ watching for dotposts to '{me}' every {interval}s. Ctrl-C to stop.",
+        f"→ watching inbox for '{me}' (DMs + broadcasts) every {interval}s. Ctrl-C to stop.",
         file=sys.stderr,
     )
     seen: set[str] = set()
     while True:
         try:
-            result = _tool_call(
-                "oracle_query",
-                {"query": f"dotpost to:{me}", "type_filter": "dotpost"},
-            )
-            text = result.get("text", "")
-            # Cheap dedup: hash the text payload, only print if new
+            text = _fetch_inbox(me)
             digest = str(hash(text))
             if digest not in seen:
                 seen.add(digest)
@@ -181,10 +215,15 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_send = sub.add_parser("send", help="post a message to a mesh peer via Oracle")
-    p_send.add_argument("--to", required=True, help="recipient handle (e.g., loam, janus, jared)")
+    p_send.add_argument("--to", required=True, help="recipient handle (e.g., loam, janus, jared, all)")
     p_send.add_argument("--body", required=True, help="message body")
     p_send.add_argument("--from", dest="from_handle", help="sender handle (default: $PIPERNET_HANDLE or rocky)")
     p_send.set_defaults(func=cmd_send)
+
+    p_bc = sub.add_parser("broadcast", help="broadcast a dotpost to ALL mesh agents (sugar for --to all)")
+    p_bc.add_argument("--body", required=True, help="message body")
+    p_bc.add_argument("--from", dest="from_handle", help="sender handle (default: $PIPERNET_HANDLE or rocky)")
+    p_bc.set_defaults(func=cmd_broadcast)
 
     p_recv = sub.add_parser("recv", help="read incoming dotposts from Oracle")
     p_recv.add_argument("--for", dest="for_handle", help="recipient handle to read for (default: $PIPERNET_HANDLE or rocky)")
