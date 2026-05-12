@@ -18,7 +18,7 @@ import sys
 
 from ..intent import Intent
 from ..identity import load_or_generate, pubkey_hex, _key_path
-from ..tags import build_intent_tags, parse_comma_list
+from ..tags import build_intent_z_tags, parse_comma_list
 from ..transport import tool_call
 
 
@@ -78,12 +78,12 @@ def cmd_intent(args: argparse.Namespace) -> int:
         # Announce the new pubkey via broadcast so other agents can verify future sigs.
         _announce_pubkey(sender, pub_hex)
 
-    # Sign the intent.
-    intent_b64, sig_b64 = intent.sign(priv_key)
+    # Sign and compress the intent (v0.5.0 wire format).
+    compressed_b64, sig_b64 = intent.to_compressed_b64(priv_key)
 
-    # Build oracle observation.
-    tags = build_intent_tags(
-        sender, intent_b64, sig_b64,
+    # Build oracle observation using compressed _z tags.
+    tags = build_intent_z_tags(
+        sender, compressed_b64, sig_b64,
         addressed_to=addressed_to,
         context_refs=context_refs if context_refs else None,
     )

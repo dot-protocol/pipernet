@@ -13,10 +13,12 @@ Tag grammar used by icontact / dotpost:
   broadcast             marks to:all observations explicitly
   reply                 marks a reply message
   in_reply_to:<obs_id>  thread parent reference
-  intent:<b64>          signed intent payload (intent substrate v0.1)
+  intent:<b64>          signed intent payload (intent substrate v0.1, uncompressed)
   intent_sig:<b64>      ed25519 signature over canonical intent bytes
-  resolve:<b64>         signed resolve payload
+  intent_z:<b64>        signed + zstd-compressed intent payload (intent substrate v0.2)
+  resolve:<b64>         signed resolve payload (v0.1, uncompressed)
   resolve_sig:<b64>     ed25519 signature over canonical resolve bytes
+  resolve_z:<b64>       signed + zstd-compressed resolve payload (v0.2)
   resolves_intent:<id>  back-reference from resolve to intent obs_id
 """
 from __future__ import annotations
@@ -189,6 +191,68 @@ def build_resolve_tags(
         f"from:{resolver}",
         f"to:{addressed_to}",
         f"resolve:{resolve_b64}",
+        f"resolve_sig:{sig_b64}",
+        f"resolves_intent:{intent_id}",
+        "mesh",
+    ]
+
+
+def build_intent_z_tags(
+    sender: str,
+    compressed_b64: str,
+    sig_b64: str,
+    *,
+    addressed_to: str = "all",
+    context_refs: list[str] | None = None,
+) -> list[str]:
+    """Build tag list for a v0.5.0 compressed intent dotpost observation.
+
+    Mirrors build_intent_tags() but uses the intent_z: tag prefix.
+    The signature is over canonical JSON, not the compressed bytes.
+
+    compressed_b64: base64url(zstd(canonical_json)) — from Intent.to_compressed_b64().
+    sig_b64: base64url(ed25519_sig_over_canonical).
+    addressed_to: routing target (handle, 'all', or 'group:<name>').
+    context_refs: optional list of obs_ids / blob refs to tag as context.
+    """
+    tags: list[str] = [
+        "dotpost",
+        "intent",
+        f"from:{sender}",
+        f"to:{addressed_to}",
+        f"intent_z:{compressed_b64}",
+        f"intent_sig:{sig_b64}",
+        "mesh",
+    ]
+    for ref in (context_refs or []):
+        tags.append(f"context_ref:{ref}")
+    return tags
+
+
+def build_resolve_z_tags(
+    resolver: str,
+    compressed_b64: str,
+    sig_b64: str,
+    intent_id: str,
+    *,
+    addressed_to: str = "all",
+) -> list[str]:
+    """Build tag list for a v0.5.0 compressed resolve dotpost observation.
+
+    Mirrors build_resolve_tags() but uses the resolve_z: tag prefix.
+
+    resolver: the from-handle of the resolver.
+    compressed_b64: base64url(zstd(canonical_json)) — from Resolve.to_compressed_b64().
+    sig_b64: base64url(ed25519_sig_over_canonical).
+    intent_id: the obs_id of the intent being resolved.
+    addressed_to: routing target.
+    """
+    return [
+        "dotpost",
+        "resolve",
+        f"from:{resolver}",
+        f"to:{addressed_to}",
+        f"resolve_z:{compressed_b64}",
         f"resolve_sig:{sig_b64}",
         f"resolves_intent:{intent_id}",
         "mesh",

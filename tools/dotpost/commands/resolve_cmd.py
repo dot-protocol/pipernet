@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from ..intent import Resolve, _utcnow_iso
 from ..identity import load_or_generate, pubkey_hex
-from ..tags import build_resolve_tags
+from ..tags import build_resolve_z_tags
 from ..transport import tool_call
 
 
@@ -83,11 +83,12 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         )
         print(f"info: pubkey = {pub_hex}", file=sys.stderr)
 
-    resolve_b64, sig_b64 = resolve.sign(priv_key)
+    # Sign and compress the resolve (v0.5.0 wire format).
+    compressed_b64, sig_b64 = resolve.to_compressed_b64(priv_key)
 
     # The resolve is addressed back to the intent's channel ("all" by default).
-    tags = build_resolve_tags(
-        resolver, resolve_b64, sig_b64, args.intent_id, addressed_to="all"
+    tags = build_resolve_z_tags(
+        resolver, compressed_b64, sig_b64, args.intent_id, addressed_to="all"
     )
 
     honored_label = {True: "honored", False: "refused", "partial": "partial"}.get(
