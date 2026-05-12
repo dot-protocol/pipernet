@@ -858,28 +858,47 @@ def cmd_send(args: "argparse.Namespace") -> None:
         print("error: provide --body-file <path> or --body-stdin", file=sys.stderr)
         sys.exit(1)
 
-    # Compose
-    envelope = compose_message(
-        sender_keys,
-        recipient_dot1,
-        recipient_ed25519_pub,
-        recipient_x25519_pub,
-        body,
-        thread=args.thread,
-        prev=args.prev,
-    )
+    # Compose — default to sealed (v0.3), `--legacy` falls back to v0.2.
+    if getattr(args, "legacy", False):
+        envelope = compose_message(
+            sender_keys,
+            recipient_dot1,
+            recipient_ed25519_pub,
+            recipient_x25519_pub,
+            body,
+            thread=args.thread,
+            prev=args.prev,
+        )
+        envelope_kind = "v0.2 (legacy — sender pubkeys plaintext)"
+    else:
+        envelope = seal_envelope(
+            sender_keys,
+            recipient_dot1,
+            recipient_ed25519_pub,
+            recipient_x25519_pub,
+            body,
+            thread=args.thread,
+            prev=args.prev,
+            subject=getattr(args, "subject", None),
+        )
+        envelope_kind = "v0.3 (sealed sender)"
 
     envelope_id = envelope["id"]
     size_bytes  = len(json.dumps(envelope, separators=(",", ":")).encode())
 
-    print(f"\nmathpost envelope composed:")
+    print(f"\nmathpost envelope composed ({envelope_kind}):")
     print(f"  envelope_id : {envelope_id}")
-    print(f"  from        : {envelope['from']}")
+    # `from` only exists at the outer layer for v0.2; for v0.3 it's inside the
+    # ciphertext (sealed sender). Show "sealed" to make the privacy posture obvious.
+    print(f"  from        : {envelope.get('from', '<sealed>')}")
     print(f"  to          : {envelope['to']}")
-    print(f"  thread      : {envelope.get('thread')}")
+    print(f"  thread      : {envelope.get('thread', '<sealed>')}")
     print(f"  ts          : {envelope['ts']}")
     print(f"  size_bytes  : {size_bytes}")
-    print(f"  sig[:32]    : {envelope['sig'][:32]}")
+    if "sig" in envelope:
+        print(f"  sig[:32]    : {envelope['sig'][:32]}")
+    if "ephemeral_x25519_pub" in envelope:
+        print(f"  ephemeral_x : {envelope['ephemeral_x25519_pub'][:32]}...")
 
     if args.no_push:
         out_path = f"/tmp/mathpost-{envelope_id[:16]}.mpost"
@@ -949,13 +968,43 @@ def cmd_pull(args: "argparse.Namespace") -> None:
         if seq > max_seq:
             max_seq = seq
 
-        env_id   = env.get("id", "?")
-        env_ts   = env.get("ts", "?")
-        env_from = env.get("from", "?")
-        env_thread = env.get("thread", None)
-        print(f"\n--- envelope  seq={seq}  id={env_id[:16]}...  ts={env_ts}  from={env_from}  thread={env_thread} ---")
+        env_id     = env.get("id", "?")
+        env_ts     = env.get("ts", "?")
+        env_version = env.get("version", "0.1")
+        is_sealed   = env_version == MATHPOST_VERSION_SEALED
 
-        # Verify signature (non-destructive: verify_signature pops/restores sig+id)
+        # For sealed envelopes the sender + thread live INSIDE the ciphertext,
+        # so we show "<sealed>" at the routing-layer summary and unseal below.
+        env_from   = "<sealed>" if is_sealed else env.get("from", "?")
+        env_thread = "<sealed>" if is_sealed else env.get("thread")
+        print(
+            f"\n--- envelope  seq={seq}  id={env_id[:16]}...  "
+            f"ts={env_ts}  version={env_version}  from={env_from}  thread={env_thread} ---"
+        )
+
+        if is_sealed:
+            # v0.3: open_sealed_envelope verifies the inner signature AND
+            # the outer_id_binding in one shot. No separate verify pass.
+            if args.verify_only:
+                print("  (verify-only on sealed envelopes requires decrypt — skipping)")
+                continue
+            try:
+                inner = open_sealed_envelope(env, own_keys)
+                n_verified  += 1   # signature checked inside open_sealed_envelope
+                n_decrypted += 1
+                plaintext = inner["body"]
+                print(f"  sig=OK  sender_revealed={inner['from']}")
+                print(f"  decrypt=OK  plaintext_bytes={len(plaintext.encode())}")
+                if args.show_body:
+                    if len(plaintext) > 500:
+                        print(f"\n  BODY (first 500 chars):\n{plaintext[:500]}\n  [... truncated, total {len(plaintext)} chars]")
+                    else:
+                        print(f"\n  BODY:\n{plaintext}")
+            except Exception as exc:
+                print(f"  unseal=FAIL  reason={exc}")
+            continue
+
+        # v0.1 / v0.2 legacy path — sender pubkeys plaintext at outer.
         sig_ok = verify_signature(env)
         print(f"  sig={'OK' if sig_ok else 'FAIL'}")
         if sig_ok:
@@ -964,7 +1013,6 @@ def cmd_pull(args: "argparse.Namespace") -> None:
         if args.verify_only:
             continue
 
-        # Decrypt
         try:
             plaintext = decrypt_body(env, own_keys)
             n_decrypted += 1
@@ -1043,8 +1091,17 @@ def main():
     pg.add_argument("--body-file",  default=None, help="Path to plaintext body file")
     pg.add_argument("--body-stdin", action="store_true",  help="Read body from stdin")
     # optional message fields
-    ps.add_argument("--thread", default=None, help="Thread ID")
-    ps.add_argument("--prev",   default=None, help="Previous envelope ID (chain)")
+    ps.add_argument("--thread",  default=None, help="Thread ID")
+    ps.add_argument("--prev",    default=None, help="Previous envelope ID (chain)")
+    ps.add_argument("--subject", default=None, help="Subject line (sealed inside body for v0.3)")
+    # version selection (sealed-sender by default)
+    ps.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Use v0.2 envelope (sender pubkeys plaintext at outer). "
+             "Default is v0.3 sealed-sender; --legacy is for senders that need "
+             "compatibility with v0.2-only receivers.",
+    )
     # transport
     ps.add_argument("--mailbox",  default=None, help="Mailbox base URL (overrides MATHPOST_MAILBOX_URL)")
     ps.add_argument("--no-push",  action="store_true", help="Write envelope to /tmp instead of pushing")
