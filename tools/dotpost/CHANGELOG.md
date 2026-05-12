@@ -39,6 +39,95 @@
 
 ---
 
+## [0.4.0] — 2026-05-12 (Shannon, Kin-1 Piper MacBook)
+
+Architecture refactor + intent substrate v0.1.
+
+The 467-line `main.py` monolith became a proper Python package. Three new
+subcommands land the intent/resolve lifecycle on Oracle as signed observations.
+
+### Architecture (refactor)
+
+`main.py` (467 lines, monolithic) decomposed into 14 modules — none over 250 lines.
+
+```
+dotpost/
+  __init__.py       — package, __version__ = "0.4.0"
+  main.py           — slim entry, dual-mode (python3 main.py + python3 -m dotpost)
+  cli.py            — argparse + dispatch (202 lines)
+  canonical.py      — RFC 8785 subset canonicalize() for deterministic signing
+  identity.py       — Ed25519 load/generate/sign/verify, key storage per-handle
+  intent.py         — Intent + Resolve dataclasses, sign/verify, b64url encode
+  tags.py           — pure tag builders (build_send_tags, build_intent_tags, …)
+  transport.py      — Oracle MCP JSON-RPC POST, SSE-unwrap, token discovery
+  commands/
+    send.py         — cmd_send
+    broadcast.py    — cmd_broadcast
+    group.py        — cmd_group
+    recv.py         — cmd_recv, fetch_inbox (exported)
+    watch.py        — cmd_watch (imports fetch_inbox from recv)
+    intent_cmd.py   — cmd_intent
+    resolve_cmd.py  — cmd_resolve
+    intents_cmd.py  — cmd_intents
+```
+
+60 tests added (tests/test_canonical.py, tests/test_tags.py, tests/test_intent.py),
+all green in 0.09 s on Python 3.14.3.
+
+### Added — intent substrate v0.1
+Spec: `pipernet/spec/intent-substrate-v0.1.md`
+
+- **`pipernet dotpost intent --what "..." [options]`** — emit a signed Intent
+  observation to Oracle. Required: `--what`. Optional: `--to` (default: all),
+  `--budget-max-usd`, `--deadline`, `--must-have`, `--must-not`, `--values`,
+  `--no-refuse-substitution` (default is `refuse_substitution=True`),
+  `--context-ref`, `--expires-at`, `--from`.
+  Tags written: `dotpost`, `intent`, `from:<sender>`, `to:<addressed_to>`,
+  `intent:<b64url-canonical>`, `intent_sig:<b64url-sig>`, `mesh`.
+
+- **`pipernet dotpost resolve --intent-id <obs_id> --honored <true|false|partial> [options]`**
+  — emit a signed Resolve observation back-referencing an intent.
+  Validation: `--deviation` is required when `--honored` is false or partial.
+  Tags written: `dotpost`, `resolve`, `from:<resolver>`, `to:all`,
+  `resolve:<b64url-canonical>`, `resolve_sig:<b64url-sig>`,
+  `resolves_intent:<obs_id>`, `mesh`.
+
+- **`pipernet dotpost intents --for <handle> [--status open|honored|refused|partial|expired] [--limit N]`**
+  — query Oracle for intent + resolve observations for a handle, join them,
+  compute derived status, print tabular summary.
+
+- **`Intent` dataclass** (`intent.py`) — fields: `what`, `v="1"`, `constraints`,
+  `values`, `refuse_substitution=True` (Tesla's law default),
+  `addressed_to="all"`, `expires_at`, `context_refs`. Methods: `to_dict()`,
+  `to_canonical_bytes()`, `sign(priv)`, `verify(pubkey, b64, sig_b64)`,
+  `from_b64(b64)`.
+
+- **`Resolve` dataclass** (`intent.py`) — fields: `intent_id`, `honored`,
+  `resolver`, `resolved_at`, `delivery`, `deviation`. Cross-field validation:
+  deviation required when `honored` is False or "partial".
+
+- **`canonicalize(obj) -> bytes`** (`canonical.py`) — RFC 8785 subset: recursive
+  key-sorted compact JSON, UTF-8. Used for deterministic signing.
+
+- **`identity.py`** — `load_or_generate(handle)`, `sign()`, `verify()`,
+  `pubkey_hex()`. Keys stored as PEM files at the per-handle key path (chmod 600).
+  New keypairs broadcast pubkey via `to:all identity` observation.
+
+### Not broken
+All five existing subcommands (`send`, `broadcast`, `group`, `recv`, `watch`)
+have identical CLI surface, tag output, and Oracle payload shape. VPS cron
+(`/usr/local/bin/dotpost-watch.sh`) verified after rsync.
+
+### Deployed
+- Commit `d14a669` on `dot-protocol/pipernet` main.
+- VPS rsync to `/opt/pipernet/tools/dotpost/` complete.
+- Backward-compat smoke: `ORACLE_TOKEN=... python3 /opt/pipernet/tools/dotpost/main.py recv --for piper` → inbox returned, 10 items.
+
+### Dependencies added
+- `cryptography>=42.0` (Ed25519 signing). Already in pipernet's declared deps.
+
+---
+
 ## [0.3.0] — 2026-05-12 (Shannon, Kin-1 Piper MacBook)
 
 Group routing primitive. The Oracle tag `to:group:<name>` is now a first-class
