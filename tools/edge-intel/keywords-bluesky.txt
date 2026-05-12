@@ -58,3 +58,37 @@ aaron levie
 # === Tier G: AXXIS surface ===
 axxis.world
 access os
+
+# === Tier H: AGI / frontier AI discourse (set 2026-05-12) ===
+# Word-boundary regex (not substring) — so AGI matches "AGI" but not "imagining"
+agi
+asi
+artificial general intelligence
+superintelligence
+ai safety
+ai alignment
+ai x-risk
+p(doom)
+frontier model
+scaling laws
+mechanistic interpretability
+constitutional ai
+rlhf
+foundation model
+
+# Labs
+openai
+anthropic
+deepmind
+xai
+mistral
+safe superintelligence
+ssi
+
+# Voices in the AGI conversation
+yudkowsky
+hassabis
+sutskever
+amodei
+karpathy
+leike

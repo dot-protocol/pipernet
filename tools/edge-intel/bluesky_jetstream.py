@@ -56,6 +56,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -193,16 +194,38 @@ def load_keywords(path: str | None) -> list[str]:
     ]
 
 
-def match_keywords(text: str, keywords: Iterable[str]) -> list[str]:
-    t = text.lower()
-    return [kw for kw in keywords if kw in t]
+def _compile_keyword(kw: str) -> re.Pattern:
+    """Compile a keyword to a word-boundary regex.
+
+    Boundary is only applied next to word characters — for symbols like
+    `$piper` the leading `$` skips the leading boundary (since `\\b\\$`
+    never matches), but the trailing `\\b` still keeps `piper` as a word.
+    Multi-word phrases match contiguously and case-insensitively.
+    """
+    parts: list[str] = []
+    if kw and kw[0].isalnum():
+        parts.append(r"\b")
+    parts.append(re.escape(kw))
+    if kw and kw[-1].isalnum():
+        parts.append(r"\b")
+    return re.compile("".join(parts), re.IGNORECASE)
+
+
+def compile_keywords(keywords: Iterable[str]) -> list[tuple[str, re.Pattern]]:
+    return [(kw, _compile_keyword(kw)) for kw in keywords]
+
+
+def match_keywords(text: str, compiled: Iterable[tuple[str, re.Pattern]]) -> list[str]:
+    """Return the list of keywords whose word-boundary pattern matches `text`."""
+    return [kw for kw, pat in compiled if pat.search(text)]
 
 
 # --- Main loop ---
 
 async def stream(args, log: logging.Logger) -> None:
     keywords = load_keywords(args.keywords_file)
-    log.info("loaded %d keywords; dry_run=%s", len(keywords), args.dry_run)
+    compiled = compile_keywords(keywords)
+    log.info("loaded %d keywords (word-boundary regex); dry_run=%s", len(keywords), args.dry_run)
     batch: list[dict] = []
     last_flush = time.monotonic()
     seen_uris: set[str] = set()
@@ -227,7 +250,7 @@ async def stream(args, log: logging.Logger) -> None:
                     text = (record.get("text") or "").strip()
                     if not text:
                         continue
-                    hits = match_keywords(text, keywords)
+                    hits = match_keywords(text, compiled)
                     if not hits:
                         continue
                     did = ev.get("did") or "did:unknown"
