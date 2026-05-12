@@ -194,6 +194,110 @@ class TestResolve(unittest.TestCase):
         self.assertFalse(d["honored"])
 
 
+class TestCompressedIntent(unittest.TestCase):
+    """v0.5.0 compressed sign/verify for Intent."""
+
+    def _make_intent(self, **kwargs) -> Intent:
+        defaults = {"what": "Ship the landing page by Friday"}
+        defaults.update(kwargs)
+        return Intent(**defaults)
+
+    def test_compressed_roundtrip(self):
+        """to_compressed_b64 + from_compressed_b64 recovers identical Intent."""
+        priv, _ = _new_key()
+        intent = self._make_intent(values=["privacy"], expires_at="2026-12-31T00:00:00Z")
+        comp_b64, _ = intent.to_compressed_b64(priv)
+        recovered = Intent.from_compressed_b64(comp_b64)
+        self.assertEqual(recovered.what, intent.what)
+        self.assertEqual(recovered.values, intent.values)
+        self.assertEqual(recovered.expires_at, intent.expires_at)
+        self.assertEqual(recovered.to_canonical_bytes(), intent.to_canonical_bytes())
+
+    def test_verify_compressed_valid(self):
+        """verify_compressed returns True with correct pubkey."""
+        priv, pub = _new_key()
+        intent = self._make_intent(what="Compressed verify test")
+        comp_b64, sig_b64 = intent.to_compressed_b64(priv)
+        self.assertTrue(Intent.verify_compressed(comp_b64, sig_b64, pub))
+
+    def test_verify_compressed_wrong_key_fails(self):
+        """verify_compressed returns False with a different pubkey."""
+        priv1, _ = _new_key()
+        _, pub2 = _new_key()
+        intent = self._make_intent(what="Wrong key compressed")
+        comp_b64, sig_b64 = intent.to_compressed_b64(priv1)
+        self.assertFalse(Intent.verify_compressed(comp_b64, sig_b64, pub2))
+
+    def test_compressed_sig_is_over_canonical_not_compressed(self):
+        """The sig from to_compressed_b64 verifies against canonical bytes (not compressed)."""
+        from dotpost.compression import decompress
+        from dotpost.identity import verify
+        import base64
+        priv, pub = _new_key()
+        intent = self._make_intent(what="Sig is over canonical")
+        comp_b64, sig_b64 = intent.to_compressed_b64(priv)
+        # Manually decompress and verify against canonical bytes
+        padding = 4 - len(comp_b64) % 4
+        if padding != 4:
+            comp_b64_padded = comp_b64 + "=" * padding
+        else:
+            comp_b64_padded = comp_b64
+        compressed = base64.urlsafe_b64decode(comp_b64_padded)
+        canonical = decompress(compressed)
+        sig = base64.urlsafe_b64decode(sig_b64 + "=" * (4 - len(sig_b64) % 4))
+        self.assertTrue(verify(pub, sig, canonical))
+        # Sig does NOT verify directly against compressed bytes
+        self.assertFalse(verify(pub, sig, compressed))
+
+
+class TestCompressedResolve(unittest.TestCase):
+    """v0.5.0 compressed sign/verify for Resolve."""
+
+    def _make_resolve(self, **kwargs) -> Resolve:
+        defaults = {
+            "intent_id": "OBS-test-intent-comp-1",
+            "honored": True,
+            "resolver": "baran",
+            "resolved_at": "2026-05-13T11:00:00Z",
+        }
+        defaults.update(kwargs)
+        return Resolve(**defaults)
+
+    def test_compressed_roundtrip(self):
+        """to_compressed_b64 + from_compressed_b64 recovers identical Resolve."""
+        priv, _ = _new_key()
+        resolve = self._make_resolve()
+        comp_b64, _ = resolve.to_compressed_b64(priv)
+        recovered = Resolve.from_compressed_b64(comp_b64)
+        self.assertEqual(recovered.intent_id, resolve.intent_id)
+        self.assertEqual(recovered.resolver, resolve.resolver)
+        self.assertEqual(recovered.to_canonical_bytes(), resolve.to_canonical_bytes())
+
+    def test_verify_compressed_valid(self):
+        """verify_compressed returns True with correct pubkey."""
+        priv, pub = _new_key()
+        resolve = self._make_resolve()
+        comp_b64, sig_b64 = resolve.to_compressed_b64(priv)
+        self.assertTrue(Resolve.verify_compressed(comp_b64, sig_b64, pub))
+
+    def test_verify_compressed_wrong_key_fails(self):
+        """verify_compressed returns False with a different pubkey."""
+        priv1, _ = _new_key()
+        _, pub2 = _new_key()
+        resolve = self._make_resolve()
+        comp_b64, sig_b64 = resolve.to_compressed_b64(priv1)
+        self.assertFalse(Resolve.verify_compressed(comp_b64, sig_b64, pub2))
+
+    def test_partial_compressed_roundtrip(self):
+        """Partial resolve with deviation survives compressed roundtrip."""
+        priv, pub = _new_key()
+        resolve = self._make_resolve(honored="partial", deviation="Missed deadline by 1 day")
+        comp_b64, sig_b64 = resolve.to_compressed_b64(priv)
+        self.assertTrue(Resolve.verify_compressed(comp_b64, sig_b64, pub))
+        recovered = Resolve.from_compressed_b64(comp_b64)
+        self.assertEqual(recovered.deviation, "Missed deadline by 1 day")
+
+
 class TestIdentitySignVerify(unittest.TestCase):
     def test_sign_verify(self):
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat

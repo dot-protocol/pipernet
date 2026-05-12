@@ -20,6 +20,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .canonical import canonicalize
+from .compression import compress, decompress
 from .identity import sign, verify
 
 
@@ -153,6 +154,70 @@ class Intent:
             context_refs=data.get("context_refs", []),
         )
 
+    # ------------------------------------------------------------------
+    # v0.5.0 compressed wire format (sign-then-compress)
+    # ------------------------------------------------------------------
+
+    def to_compressed_b64(self, private_key: Ed25519PrivateKey) -> tuple[str, str]:
+        """Sign and compress this intent for the v0.5.0 wire format.
+
+        Signature is over the *canonical JSON bytes*, not the compressed bytes.
+        Compression is transport-only.
+
+        Returns:
+            (compressed_b64, sig_b64) where:
+              - compressed_b64: base64url(zstd(canonical_json)) — the intent_z: tag value.
+              - sig_b64: base64url(ed25519_sig_over_canonical) — same sig as .sign().
+        """
+        canonical = self.to_canonical_bytes()
+        sig_bytes = sign(private_key, canonical)
+        return _b64url_encode(compress(canonical)), _b64url_encode(sig_bytes)
+
+    @classmethod
+    def from_compressed_b64(cls, compressed_b64: str) -> "Intent":
+        """Reconstruct an Intent from its compressed base64url form (intent_z: tag).
+
+        Raises ValueError if the bytes cannot be decoded or decompressed.
+        """
+        import json
+        try:
+            raw = decompress(_b64url_decode(compressed_b64))
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"Cannot decode compressed intent: {exc}") from exc
+        return cls(
+            v=data.get("v", "1"),
+            what=data["what"],
+            constraints=data.get("constraints", {}),
+            values=data.get("values", []),
+            refuse_substitution=data.get("refuse_substitution", True),
+            addressed_to=data.get("addressed_to", "all"),
+            expires_at=data.get("expires_at"),
+            context_refs=data.get("context_refs", []),
+        )
+
+    @classmethod
+    def verify_compressed(
+        cls,
+        compressed_b64: str,
+        sig_b64: str,
+        pubkey_bytes: bytes,
+    ) -> bool:
+        """Verify a v0.5.0 compressed intent tag pair.
+
+        Decompresses the canonical JSON, then verifies the signature against
+        those decompressed bytes.  The signature is over canonical JSON, not
+        over the compressed form.
+
+        Returns True if the signature is valid; False on any failure.
+        """
+        try:
+            canonical = decompress(_b64url_decode(compressed_b64))
+            sig = _b64url_decode(sig_b64)
+            return verify(pubkey_bytes, sig, canonical)
+        except Exception:
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Resolve
@@ -247,6 +312,67 @@ class Resolve:
             sig = _b64url_decode(sig_b64)
             if canonical != self.to_canonical_bytes():
                 return False
+            return verify(pubkey_bytes, sig, canonical)
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # v0.5.0 compressed wire format (sign-then-compress)
+    # ------------------------------------------------------------------
+
+    def to_compressed_b64(self, private_key: Ed25519PrivateKey) -> tuple[str, str]:
+        """Sign and compress this resolve for the v0.5.0 wire format.
+
+        Signature is over the *canonical JSON bytes*, not the compressed bytes.
+
+        Returns:
+            (compressed_b64, sig_b64) where:
+              - compressed_b64: base64url(zstd(canonical_json)) — the resolve_z: tag value.
+              - sig_b64: base64url(ed25519_sig_over_canonical).
+        """
+        canonical = self.to_canonical_bytes()
+        sig_bytes = sign(private_key, canonical)
+        return _b64url_encode(compress(canonical)), _b64url_encode(sig_bytes)
+
+    @classmethod
+    def from_compressed_b64(cls, compressed_b64: str) -> "Resolve":
+        """Reconstruct a Resolve from its compressed base64url form (resolve_z: tag).
+
+        Raises ValueError if the bytes cannot be decoded or decompressed.
+        """
+        import json
+        try:
+            raw = decompress(_b64url_decode(compressed_b64))
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"Cannot decode compressed resolve: {exc}") from exc
+        return cls(
+            v=data.get("v", "1"),
+            intent_id=data["intent_id"],
+            honored=data["honored"],
+            resolver=data["resolver"],
+            resolved_at=data.get("resolved_at", _utcnow_iso()),
+            delivery=data.get("delivery", {"observation": None, "blob": None, "url": None}),
+            deviation=data.get("deviation"),
+        )
+
+    @classmethod
+    def verify_compressed(
+        cls,
+        compressed_b64: str,
+        sig_b64: str,
+        pubkey_bytes: bytes,
+    ) -> bool:
+        """Verify a v0.5.0 compressed resolve tag pair.
+
+        Decompresses the canonical JSON, then verifies the signature against
+        those decompressed bytes.
+
+        Returns True if the signature is valid; False on any failure.
+        """
+        try:
+            canonical = decompress(_b64url_decode(compressed_b64))
+            sig = _b64url_decode(sig_b64)
             return verify(pubkey_bytes, sig, canonical)
         except Exception:
             return False
