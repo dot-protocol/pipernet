@@ -63,7 +63,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 try:
     import websockets
@@ -71,19 +70,13 @@ except ImportError:
     print("ERROR: websockets not installed. Run: pip install websockets", file=sys.stderr)
     sys.exit(2)
 
+from _common import OracleClient, SidecarWriter, configure_logging  # noqa: E402
 
-# --- Oracle plumbing (mirrors pipernet/tools/dotpost/main.py) ---
-
-ORACLE_BASE = os.getenv("ORACLE_BASE", "https://oracle.axxis.world")
-ORACLE_MCP_PATH = os.getenv("ORACLE_MCP_PATH", "/oracle/mcp/")
 JETSTREAM_URL = os.getenv(
     "BLUESKY_JETSTREAM_URL",
     "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post",
 )
-# Sidecar feed file for Mission Control UI (decouples /edge view from Oracle MCP).
-# JSONL append-only, one match per line. Mission Control tails the last N lines.
 SIDECAR_PATH = os.getenv("EDGE_INTEL_SIDECAR", "/var/lib/edge-intel/bluesky.jsonl")
-SIDECAR_MAX_BYTES = int(os.getenv("EDGE_INTEL_SIDECAR_MAX_BYTES", str(50 * 1024 * 1024)))  # 50 MB
 
 DEFAULT_KEYWORDS = [
     # Pied Piper / Pipernet / DOT
@@ -103,80 +96,16 @@ DEFAULT_KEYWORDS = [
 ]
 
 
-def _oracle_token() -> str:
-    """Resolve the Oracle bearer token in priority order."""
-    for var in ("ORACLE_TOKEN", "ORACLE_AUTH_TOKEN", "TREE_AUTH_TOKEN"):
-        if t := os.getenv(var):
-            return t
-    mcp_path = Path.home() / ".mcp.json"
-    if mcp_path.exists():
-        try:
-            cfg = json.loads(mcp_path.read_text())
-            auth = cfg.get("mcpServers", {}).get("oracle", {}).get("headers", {}).get("Authorization", "")
-            if auth.startswith("Bearer "):
-                return auth[len("Bearer "):]
-        except (json.JSONDecodeError, KeyError):
-            pass
-    for env_path in (
-        Path.home() / "Movies" / "Kin" / "oracle_v3" / ".env",
-        Path("/opt/tree/.env"),
-    ):
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                if line.startswith("ORACLE_AUTH_TOKEN="):
-                    return line.split("=", 1)[1].strip()
-    raise RuntimeError("Oracle token not found. Set ORACLE_TOKEN env var.")
+_oracle = OracleClient("edge-intel-bluesky", "pipernet-edge-intel-bluesky/0.1")
+_sidecar = SidecarWriter(SIDECAR_PATH)
 
 
 def _oracle_ingest(items: list[dict]) -> dict:
-    payload = {
-        "jsonrpc": "2.0",
-        "id": int(time.time() * 1000),
-        "method": "tools/call",
-        "params": {
-            "name": "oracle_ingest",
-            "arguments": {
-                "source": f"edge-intel-bluesky-{datetime.now(timezone.utc).strftime('%Y%m%d')}",
-                "extracted": {"items": items},
-            },
-        },
-    }
-    req = Request(
-        f"{ORACLE_BASE.rstrip('/')}{ORACLE_MCP_PATH}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {_oracle_token()}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "User-Agent": "pipernet-edge-intel-bluesky/0.1 (+https://piedpiper.fun)",
-        },
-        method="POST",
-    )
-    with urlopen(req, timeout=20) as resp:
-        body = resp.read().decode("utf-8")
-    for line in body.splitlines():
-        if line.startswith("data:"):
-            return json.loads(line[5:].strip())
-    return {"raw": body[:500]}
+    return _oracle.ingest(items)
 
 
 def _sidecar_write(record: dict, log: logging.Logger) -> None:
-    """Append one match to the JSONL sidecar for the Mission Control UI."""
-    try:
-        path = Path(SIDECAR_PATH)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Rotate if file exceeds cap — simple keep-last-half truncation.
-        if path.exists() and path.stat().st_size > SIDECAR_MAX_BYTES:
-            data = path.read_bytes()
-            mid = len(data) // 2
-            # Slice from next newline so we keep whole records
-            cut = data.find(b"\n", mid)
-            if cut > 0:
-                path.write_bytes(data[cut + 1:])
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError as e:
-        log.warning("sidecar write failed (%s)", e)
+    _sidecar.write(record, log)
 
 
 # --- Filter ---
