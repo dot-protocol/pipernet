@@ -118,7 +118,12 @@ def _tool_call(tool_name: str, args: dict) -> dict:
 BROADCAST_HANDLE = "all"
 
 
-def _send_dotpost(sender: str, recipient: str, body: str) -> dict:
+def _send_dotpost(
+    sender: str,
+    recipient: str,
+    body: str,
+    reply_to: str | None = None,
+) -> dict:
     is_broadcast = recipient == BROADCAST_HANDLE
     tags = ["dotpost", f"from:{sender}", f"to:{recipient}", "mesh"]
     if is_broadcast:
@@ -126,6 +131,10 @@ def _send_dotpost(sender: str, recipient: str, body: str) -> dict:
         rationale = f"DOTpost broadcast from {sender} to all mesh agents"
     else:
         rationale = f"DOTpost from {sender} to {recipient} via mesh"
+    if reply_to:
+        tags.append("reply")
+        tags.append(f"in_reply_to:{reply_to}")
+        rationale = f"{rationale} (reply to {reply_to})"
 
     payload = {
         "source": f"pipernet-mesh-{sender}",
@@ -142,20 +151,21 @@ def _send_dotpost(sender: str, recipient: str, body: str) -> dict:
         },
     }
     arrow = "→ ALL" if is_broadcast else f"→ {recipient}"
-    print(f"{sender}@mesh {arrow} ({len(body)} chars)", file=sys.stderr)
+    suffix = f" reply→{reply_to}" if reply_to else ""
+    print(f"{sender}@mesh {arrow}{suffix} ({len(body)} chars)", file=sys.stderr)
     return _tool_call("oracle_ingest", payload)
 
 
 def cmd_send(args: argparse.Namespace) -> int:
     sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
-    result = _send_dotpost(sender, args.to, args.body)
+    result = _send_dotpost(sender, args.to, args.body, getattr(args, "reply_to", None))
     print(json.dumps(result, indent=2))
     return 0
 
 
 def cmd_broadcast(args: argparse.Namespace) -> int:
     sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
-    result = _send_dotpost(sender, BROADCAST_HANDLE, args.body)
+    result = _send_dotpost(sender, BROADCAST_HANDLE, args.body, getattr(args, "reply_to", None))
     print(json.dumps(result, indent=2))
     return 0
 
@@ -218,11 +228,13 @@ def main(argv: list[str] | None = None) -> int:
     p_send.add_argument("--to", required=True, help="recipient handle (e.g., loam, janus, jared, all)")
     p_send.add_argument("--body", required=True, help="message body")
     p_send.add_argument("--from", dest="from_handle", help="sender handle (default: $PIPERNET_HANDLE or rocky)")
+    p_send.add_argument("--reply-to", dest="reply_to", help="thread this message under an OBS id (adds reply + in_reply_to:<id> tags; bypasses Oracle vector dedup)")
     p_send.set_defaults(func=cmd_send)
 
     p_bc = sub.add_parser("broadcast", help="broadcast a dotpost to ALL mesh agents (sugar for --to all)")
     p_bc.add_argument("--body", required=True, help="message body")
     p_bc.add_argument("--from", dest="from_handle", help="sender handle (default: $PIPERNET_HANDLE or rocky)")
+    p_bc.add_argument("--reply-to", dest="reply_to", help="thread this broadcast under an OBS id (adds reply + in_reply_to:<id> tags; bypasses Oracle vector dedup)")
     p_bc.set_defaults(func=cmd_broadcast)
 
     p_recv = sub.add_parser("recv", help="read incoming dotposts from Oracle")

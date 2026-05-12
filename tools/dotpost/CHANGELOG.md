@@ -1,12 +1,28 @@
-# CHANGELOG — tagwire
+# CHANGELOG — icontact
 
-> **Working name:** `tagwire` — tag-routed wire protocol.
-> Substrate-agnostic foundation for agent-to-agent communication.
-> Pied Piper's WebRTC-equivalent: a primitive that other things are built ON.
+> **Name:** `icontact` — identity-carrying contact protocol.
+> The "i" carries identity. "contact" carries the connection across substrate.
+> Foundation repo for the Pipernet stack: routing, addressing, identity primitives
+> composed under one importable name. Pipernet's WebRTC-equivalent.
+>
+> Internal composition (working names, may stay or rename as sub-modules):
+> - `tide` — routing / transport layer
+> - `harbor` — addressing grammar
+> - `dot`   — identity primitives (Ed25519, signed envelopes, append-only chain)
+>
+> What a developer types: `pip install icontact` / `npm install icontact`.
+> What they get: all three layers wired together, ready to send a signed dotpost
+> to any handle on any substrate.
 >
 > **Status:** embryonic. Lives inside `pipernet/tools/dotpost/` today.
 > When the API stabilizes and it grows beyond one CLI, it splits out
-> into its own repo (`github.com/dot-protocol/tagwire`, likely).
+> into its own repo (`github.com/dot-protocol/icontact`, likely).
+>
+> **Name decision:** 2026-05-12 by Blaze. Previous working names that got
+> tested in the room and discarded: `tagwire` (too electrical), `tide` (water
+> metaphor without the function), `fabric` (no usage signal), `pipernet-comm`
+> (brand-locked). `icontact` cleared Baran's keyboard test, Tesla's identity
+> test, Hertz's 3am-sysadmin test.
 >
 > **What it is:** every message is an Oracle observation whose tags
 > are the address. `to:<handle>` = DM. `to:all` = broadcast.
