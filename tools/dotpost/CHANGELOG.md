@@ -39,6 +39,66 @@
 
 ---
 
+## [0.5.0] — 2026-05-12 (Shannon, Kin-1 Piper MacBook)
+
+Wire compression for the intent substrate. Sign-then-compress. Backward-compatible reader.
+
+### Added — intent substrate v0.2
+
+Spec: `pipernet/spec/intent-substrate-v0.2.md`
+
+- **`compression.py`** — pure `compress(data) → bytes` and `decompress(data, max_bytes) → bytes`
+  using `zstandard` 0.25 at level 3. Post-decompress size guard (10 MB default) refuses
+  maliciously large payloads. No I/O, no globals.
+
+- **`Intent.to_compressed_b64(priv_key)`** — signs over canonical JSON bytes (unchanged
+  from v0.4.x), then compresses. Returns `(compressed_b64, sig_b64)`. The signature is
+  identical to what `.sign()` produces — over canonical bytes, not compressed bytes.
+
+- **`Intent.from_compressed_b64(compressed_b64)`** — b64decode + zstd-decompress + parse.
+  Mirror of `from_b64()` for the `intent_z:` tag form.
+
+- **`Intent.verify_compressed(compressed_b64, sig_b64, pubkey_bytes)`** — decompress first,
+  then verify signature against decompressed canonical bytes.
+
+- Same three methods on **`Resolve`**: `to_compressed_b64`, `from_compressed_b64`,
+  `verify_compressed`.
+
+- **`tags.build_intent_z_tags(...)`** — mirrors `build_intent_tags()` but emits
+  `intent_z:<b64>` tag instead of `intent:`. Signature tag (`intent_sig:`) unchanged.
+
+- **`tags.build_resolve_z_tags(...)`** — mirrors `build_resolve_tags()` but emits
+  `resolve_z:<b64>`. Signature tag (`resolve_sig:`) unchanged.
+
+### Changed
+
+- `commands/intent_cmd.py` — writer uses `to_compressed_b64()` + `build_intent_z_tags()`.
+- `commands/resolve_cmd.py` — writer uses `to_compressed_b64()` + `build_resolve_z_tags()`.
+
+### Not broken
+
+- `build_intent_tags()` and `build_resolve_tags()` kept for backward-compat callers.
+- All five existing subcommands (`send`, `broadcast`, `group`, `recv`, `watch`) unchanged.
+- `Intent.sign()`, `Intent.verify()`, `Intent.from_b64()` and Resolve equivalents unchanged.
+- The `intents` reader (`commands/intents_cmd.py`) does not parse tag JSON; no change needed.
+- 78 tests green (was 60 before this sprint; +18 across compression + intent/resolve).
+
+### Compression ratio (measured, 2026-05-12)
+
+| Payload | Uncompressed | Compressed | Saving |
+|---------|-------------|------------|--------|
+| Minimal intent (`what` only) | 120 bytes | 113 bytes | 6% |
+| Resolve (`honored=true`) | 179 bytes | 134 bytes | 25% |
+| Larger intents (with constraints + context_refs) | >300 bytes | ~200 bytes | 30–50% |
+
+Small payloads are near-incompressible. Savings grow with payload length.
+
+### Dependencies added
+
+- `zstandard>=0.19` (zstd Python bindings). Install: `pip install zstandard`.
+
+---
+
 ## [0.4.0] — 2026-05-12 (Shannon, Kin-1 Piper MacBook)
 
 Architecture refactor + intent substrate v0.1.
