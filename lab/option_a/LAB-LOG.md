@@ -4,6 +4,71 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-013 — 2026-05-16 — APM/SSE final-stage remap — NULL RESULT (v0)
+
+**Hypothesis:** Eugene Shelwien's APM/SSE (per-context 7-bin probability
+remap, ~60 LOC) chains AFTER the bit-level mix and BEFORE the arithmetic
+coder. fx2-cmix uses several SSE stages. On top of the EXPT-012 tuned
+baseline this should give +1-2%.
+
+**Method:** `apm.py` — `SSEModel` (7 bins × n_contexts table, stretch-based
+quantization, EMA update on adjacent bins per bit observation) wrapped via
+`SSEWrappedBitPredictor`. Two context schemes:
+  a) `_ctx_by_bit_position`         — 8 slots (one per bit position k)
+  b) `_ctx_by_bit_position_x_lastbyte` — 2048 slots (last byte × bit position)
+
+Initial table = identity remap (bin i value = sigmoid(stretch_pos_i)) so
+the SSE is a no-op on the first bit, then deviates as EMA learns. This is
+the standard PAQ/cmix init — getting it wrong distorts the first thousands
+of bits before EMA recovers.
+
+**Result on 100KB enwik8:**
+
+| Stack | Bytes | bpb | vs gzip-9 | vs EXPT-012 |
+|---|---|---|---|---|
+| EXPT-012 baseline (tuned mix, no SSE) | 30,926 | 2.4741 | −14.66% | — |
+| EXPT-013a (8-ctx SSE wrap) | 32,656 | 2.6125 | −9.89% | **+5.59%** |
+| EXPT-013b (2048-ctx SSE wrap) | 31,810 | 2.5448 | −12.22% | **+2.86%** |
+
+All variants byte-exact roundtrip ✓.
+
+**Verdict: NULL (v0).** Both SSE variants are WORSE than the baseline:
++5.59% for the 8-context coarse version, +2.86% for the 2048-context fine
+version. Adding SSE on top of the SGD-tuned mix hurts.
+
+**Why this null:**
+1. The SGD-tuned mix is already very well-calibrated; SSE has nothing to
+   correct. Adding a learned remap introduces noise during the warmup
+   period (first many thousand bits) that the final EMA doesn't fully
+   recover from.
+2. 8 context slots is too coarse — the SSE learns one remap for all of
+   bit-position k's predictions, regardless of underlying context.
+3. 2048 slots is closer but still bound by SSE running cold over 100KB:
+   ~50 updates per slot is too few for the EMA to find anything useful.
+
+**Two v1 paths to try:**
+1. **SSE as a SIBLING predictor** in the MultiBitPredictor stack, NOT as a
+   wrapper. Let the SGD tuner learn its weight. PAQ uses APMs this way —
+   they're another signal, not a final remap. The tuner can down-weight
+   them to ~0 if they're not helping.
+2. **Chain SSEs** before the mix on each individual predictor's output —
+   each predictor gets its own SSE remap to "calibrate" its raw output
+   before mixing. Could help especially for Indirect, whose state-machine
+   predictions are coarse and benefit from EMA smoothing.
+
+For now: EXPT-013 logged as a null, move to higher-EV moves
+(more predictor families, Cython port, WRT preprocessing).
+
+**Artefacts:**
+- `option_a/apm.py` (140 LOC): SSEModel + SSEWrappedBitPredictor
+- `option_a/expt_apm.py` (130 LOC): harness comparing baseline vs 2 SSE schemes
+
+**References:**
+- https://encode.ru/threads/2515-mod_ppmd (Shelwien's original)
+- `lab/fx2-cmix/src/mixer/sse.cpp` (328 LOC C++ reference)
+
+---
+
 ## EXPT-012 — 2026-05-16 — Online weight tuner for bit-level mix — TUNER >> HAND-PICKED
 
 **Hypothesis:** EXPT-010 and EXPT-011 showed the bit-level mix's compressed
@@ -52,8 +117,23 @@ Tuned weights: `[0.489, 0.199, 0.211, 0.195]` — Phase 1 down-weighted (0.9 →
 Indirect 3/2/1 all converging to ~0.2 (vs my hand-descending hierarchy 0.20/0.12/0.08).
 
 **Result on 1MB enwik8:**
-  In flight (~30 min wall, will amend when Monitor fires).
-  Expected: −15-17% vs gzip-9, beating EXPT-010 fine and EXPT-011 hand.
+
+| Stack | Bytes | bpb | vs gzip-9 |
+|---|---|---|---|
+| gzip-9 | 355,791 | 2.8463 | — |
+| EXPT-011 best (3 Ind, hand) | 299,802 | 2.3984 | −15.74% |
+| **EXPT-012 (3 Ind, TUNED)** | **275,933** | **2.2075** | **−22.45%** |
+
+Tuned weights at 1MB: `[0.4888, 0.1983, 0.2103, 0.1954]` — essentially
+identical to the 100KB tuned weights `[0.489, 0.199, 0.211, 0.195]`.
+The SGD optimum is scale-invariant once enough data is observed (8M bits
+at 1MB; 800K bits at 100KB — both converge to the same point).
+
+Tuning cost: 125.5s (one pass over 1MB at lr_init=0.01).
+Tune-time online-learning bpb: 2.2060 (matches the encode bpb 2.2075 within
+quantization noise — tuner correctly predicts the encode result).
+
+Improvement over hand-picked at 1MB: −7.96% (23,869 bytes saved).
 
 **All variants byte-exact roundtrip ✓.**
 
@@ -116,7 +196,22 @@ Phase 1 fixed at w=0.9 (EXPT-010 fine optimum). Map sizes: hist=3 → 1<<24
 
 All 5 variants byte-exact roundtrip ✓.
 
-**1MB:** in flight (will amend with result).
+**Result on 1MB enwik8:**
+
+| Configuration | Bytes | bpb | vs gzip-9 |
+|---|---|---|---|
+| gzip-9 | 355,791 | 2.8463 | — |
+| EXPT-010 best (1 Ind, hist=3) | 311,764 | 2.4941 | −12.37% |
+| P1 + Ind(hist=3) + Ind(hist=2) | 302,570 | 2.4206 | −14.96% |
+| **P1 + Ind(hist=3,2,1) — 3 Indirects** | **299,802** | **2.3984** | **−15.74% (best)** |
+| P1 + Ind(hist=3, lr=0.03) + Ind(hist=2) | 301,872 | 2.4150 | −15.16% |
+| P1 + Ind(hist=3) + Ind(hist=2, big map) | 302,566 | 2.4205 | −14.96% |
+
+All 5 variants byte-exact roundtrip ✓.
+
+At 1MB the 3-Indirect ensemble wins by the same margin pattern as 100KB.
+The architectural rule "more orthogonal Indirects + smaller individual weights"
+holds at scale.
 
 **Verdict: STACKING WINS.** Each added Indirect predictor at a different
 `hist` brings genuinely independent signal. From −4.09% to −10.52% on 100KB
