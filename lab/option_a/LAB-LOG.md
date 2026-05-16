@@ -4,6 +4,120 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-008 — 2026-05-16 — Bit-level codec baseline (Phase 2C foundation) — EQUIVALENCE GATE PASSED
+
+**Hypothesis:** Wrap the byte-level mixer inside a bit-level codec
+(`BytewiseBitPredictor`) such that each byte becomes 8 nested AC calls walking
+the binary tree over the byte-level cum_freqs interval. This should be
+mathematically equivalent to the byte-level codec up to integer-truncation
+noise in `encode_symbol`. If we can prove equivalence + byte-exact roundtrip
+at scale, the architecture is unlocked for bit-native predictors (indirect
+context model, APM/SSE, high-cardinality per-context dispatch).
+
+**Method:** Three new files in `option_a/`:
+- `bit_mixer.py` — `BitPredictor` protocol + `BytewiseBitPredictor` (snapshots
+  byte-level cum_freqs at `start_byte`, walks the bit-tree at `predict_bit`,
+  updates underlying predictors at `commit_byte`).
+- `bit_codec.py` — `bit_encode` / `bit_decode`. Per byte: 8 calls to
+  `encode_symbol(low, high, precision)` on a 2-symbol bit interval. p_one
+  quantized to integer in [1, precision-1]. Bit ordering MSB-first;
+  `bit_context = 1` sentinel, `bit_context = (bit_context << 1) | bit` step.
+- `expt_bit_baseline.py` — drives byte-level and bit-level encoders over the
+  same predictor stack; reports delta and roundtrip.
+
+Bit-level AC precision swept: 2^24, 2^20, 2^16, 2^12.
+
+**Result on 10KB enwik8:**
+
+| Pipeline | Bytes | bpb | vs byte |
+|---|---|---|---|
+| byte-level geometric | 4,456 | 3.5648 | baseline |
+| byte-level Phase 1 logistic | 4,462 | 3.5696 | baseline |
+| bit wrapping byte-geometric (2^24) | 4,456 | 3.5648 | **+0.000%** |
+| bit wrapping byte-Phase1 (2^24) | 4,462 | 3.5696 | **+0.000%** |
+| bit wrapping byte-Phase1 (2^20..2^12) | 4,462 | 3.5696 | **+0.000%** |
+
+**Result on 100KB enwik8:**
+
+| Pipeline | Bytes | bpb | vs byte |
+|---|---|---|---|
+| byte-level geometric | 37,502 | 3.0002 | baseline |
+| byte-level Phase 1 logistic | 36,510 | 2.9208 | baseline |
+| bit wrapping byte-geometric (2^24) | 37,502 | 3.0002 | **+0.000%** |
+| bit wrapping byte-Phase1 (2^24) | 36,511 | 2.9209 | **+0.003%** (+1 byte) |
+| bit wrapping byte-Phase1 (2^20) | 36,510 | 2.9208 | +0.000% |
+| bit wrapping byte-Phase1 (2^16) | 36,510 | 2.9208 | +0.000% |
+| bit wrapping byte-Phase1 (2^12) | 36,497 | 2.9198 | −0.036% (trunc luck) |
+
+**Result on 1MB enwik8 (the at-scale verification):**
+
+| Pipeline | Bytes | bpb | vs byte |
+|---|---|---|---|
+| byte-level geometric | 338,769 | 2.7102 | baseline |
+| byte-level Phase 1 logistic | 323,520 | 2.5882 | baseline |
+| bit wrapping byte-geometric (2^24) | 338,769 | 2.7102 | **+0.000%** |
+| bit wrapping byte-Phase1 (2^24) | 323,520 | 2.5882 | **+0.000%** |
+| bit wrapping byte-Phase1 (2^20) | 323,520 | 2.5882 | +0.000% |
+| bit wrapping byte-Phase1 (2^16) | 323,496 | 2.5880 | −0.007% |
+| bit wrapping byte-Phase1 (2^12) | 323,101 | 2.5848 | −0.130% (trunc luck) |
+
+At 1MB, byte-Phase1 = 323,520 (using locked 100KB-trained weights). Refit-on-1MB
+weights from EXPT-007 yielded 323,469 — the 51-byte gap is the weight refit
+delta, not a bit-codec artifact. Equivalence between byte and bit-level holds
+under both weight sets.
+
+**Roundtrip:** `decode(encode(data)) == data` verified byte-exact on the
+bit-Phase1 blob at 10KB, 100KB, and 1MB.
+
+**Verdict: EQUIVALENCE GATE PASSED.** Bit-level wrapping byte-level mixers is
+byte-equivalent to the byte-level codec at the granularity the AC supports.
+The 8 bit-tree narrowings cumulate to the same arithmetic interval as a single
+byte-level `encode_symbol`, so all encoders converge to the same bit stream
+up to integer truncation. No bug.
+
+**Why this matters:** the bit-level architecture is now the canonical path.
+The byte-level codec is preserved as a fast reference, but new predictors land
+on the bit side. Three doors are open:
+1. **fx2-cmix indirect context model** (`indirect.h`, 68 LOC): context_hash
+   → state byte → 256-entry probability table, all keyed on bit_context.
+   Expected +3-7% on text.
+2. **Shelwien APM/SSE final stage** (~60 LOC): quantize bit-prob into 7 bins
+   per context, EMA-update adjacent bins. Chains after the mixer, before AC.
+   Expected +1-2%.
+3. **High-cardinality per-context mixer** (>256 slots): now that context can
+   include bit-level state (bit_context + byte_partial + last 1-2 bytes),
+   we can hash to 10k+ slots like fx2-cmix's `Mixer::GetContextData`. This is
+   the missing condition that made EXPT-006 fail at 1MB.
+
+**Phase 2 sequence now:**
+
+| Phase | Move | Status |
+|---|---|---|
+| 2A | AC precision | NULL (EXPT-002) |
+| 2B' | Phase 1 global as SOTA | DONE (323,469B @ 1MB, −9.1% vs gzip-9) |
+| 2C | **Bit-level codec refactor + equivalence gate** | **DONE (EXPT-008)** |
+| 2D | Indirect context model (state byte + 256-entry table) | NEXT |
+| 2E | APM/SSE chained after bit-mixer | after 2D |
+| 2F | Per-context mixer with bit-level hash (10k+ slots) | after 2D |
+
+**Performance:** bit-Phase1 at 100KB took 6.2s encode + 6.6s decode (pure Python).
+Byte-Phase1 took 5.6s encode. ~10% slowdown for 8x more AC calls is fine —
+this is the architectural reference, not the hot path. Cython port later.
+
+**Artefacts:**
+- `option_a/bit_mixer.py` (147 LOC)
+- `option_a/bit_codec.py` (104 LOC)
+- `option_a/expt_bit_baseline.py` (130 LOC)
+- `option_a/__pycache__/bit_*.cpython*` (built cleanly)
+
+**References:**
+- FX2CMIX-STRUCTURE-2026-05-16.md §1 (per-context weights with bit-level state)
+- FX2CMIX-STRUCTURE-2026-05-16.md §"What I'd build first" (port-leverage order)
+- src.baseline.ArithmeticEncoder.encode_symbol contract (interval truncation)
+- PAQ bit_context tree convention (start at 1, shift+OR on each bit)
+
+---
+
 ## EXPT-007 — 2026-05-16 — Per-context mixer at 1MB scale + variant sweep — REVERSES EXPT-006
 
 **Hypothesis:** EXPT-006's per-context mixer gain (-3.5% on 100KB) should
