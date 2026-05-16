@@ -4,6 +4,76 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-006 — 2026-05-16 — Per-context mixer weights (fx2-cmix port)
+
+**Hypothesis:** fx2-cmix's `Mixer::GetContextData()` stores weights PER unique
+context hash (up to 10,000 distinct contexts). This is the single biggest source
+of mixer intelligence in PAQ-class compressors. Phase 1 learned ONE global weight
+vector for the whole 100KB. EXPT-006: maintain a 256-entry table indexed by
+previous byte, each entry an independent 5-weight vector trained by SGD.
+Warm-started from Phase 1's converged global weights.
+
+**Method:** `expt_per_context.py 100000`. Tokenisation: `context = data[i-1]`
+for byte i (using 0 for i=0). Weight table shape `(256, 5)`, warm-start
+`[0.63, 1.40, 0.99, 0.55, 2.03]` (Phase 1 result). SGD per byte updates only
+that byte's context row. `lr_init=0.05`, `lr_decay=0.9999`, clip ±5.0.
+
+**Result:**
+| Pipeline | Bytes | bpb | vs geometric | vs gzip-9 |
+|---|---|---|---|---|
+| gzip-9 baseline | 36,239 | 2.8991 | n/a | 0% |
+| track-B geometric | 37,502 | 3.0002 | 0% | +3.49% |
+| track-B Phase 1 global tuned | 36,510 | 2.9208 | −2.64% | +0.75% |
+| **track-B per-context tuned** | **35,245** | **2.8196** | **−6.02%** | **−2.74%** |
+
+**vs Phase 1 global:** −3.465%. Target was ≥0.5%. **PASS at 7x target.**
+
+**Statistics from SGD pass:**
+- 156/256 contexts saw updates (the rest are bytes that never preceded another byte in 100KB)
+- Median 41 updates per context (seen)
+- Max 13,461 updates (likely byte 0x20 = space, which precedes almost every word start)
+- SGD training-time bpb = 2.8203 (matches final 2.8196 encode bpb, confirming weights are stable at end of training)
+
+**Roundtrip:** ✓ byte-exact verified (encode → decode → compare).
+
+**Verdict: PASS — and first time track-B beats gzip-9 on 100KB enwik8.** This is
+the largest single-experiment gain so far in the Option A trajectory:
+
+| Cumulative gain log | vs raw track-B (37,502) |
+|---|---|
+| After Phase 1 (EXPT-001, global SGD weights) | −2.64% → 36,510 |
+| After EXPT-003 (Match-16 added) | small additional, not stacked |
+| After EXPT-006 (per-context 256-byte table) | **−6.02% → 35,245** |
+
+**What the weights learned (preliminary):** highest-update-count contexts are
+space, period, common letters. Each developed its own weight profile. Detailed
+weight inspection deferred to EXPT-007.
+
+**Decision:** Ship per-context mixer to default. Phase 2 sequence revised:
+
+| Phase | Move | Status |
+|---|---|---|
+| 2A | ~~AC precision~~ | NULL (EXPT-002) |
+| **2B** | **Per-context mixer weights (last-byte context)** | **SHIPPED (EXPT-006)** |
+| 2C | Bit-level codec refactor | NEXT (prerequisite for 2D/2E) |
+| 2D | Indirect context model | per FX2CMIX-STRUCTURE-2026-05-16.md (3-7% expected) |
+| 2E | APM/SSE final stage | per FX2CMIX-STRUCTURE-2026-05-16.md (1-2% expected) |
+| 2F | Multi-context mixers (>1 mixer with different context keys) | when 2D lands |
+
+Future EXPT-007 candidates (cheaper than the bit-level refactor):
+- Per-context using last 2 bytes hashed to 256 slots (vs single-byte)
+- Per-context using word-type signal (alpha / digit / space / punct → 4 contexts only, but very dense updates)
+- Staircase decay schedule (fx2-cmix style: 1.0 → 0.7 → 0.3 → 0.2)
+- Multiple per-context mixers, one keyed by last byte, one keyed by last 2 bytes, mixed by a Layer-1 mixer (fx2-cmix two-layer architecture)
+
+**Artefacts:**
+- `option_a/expt_per_context.py` — full experiment, roundtrip-verified
+- Trained 256-row weight table (in-memory; serialise to disk in EXPT-007)
+
+**Reference:** `FX2CMIX-STRUCTURE-2026-05-16.md` §1 (Mixer GetContextData)
+
+---
+
 ## EXPT-005 — 2026-05-16 — WRT selectivity sweep (min_word_len 3..8)
 
 **Hypothesis:** EXPT-004 showed WRT v0 was a wash because we were replacing
