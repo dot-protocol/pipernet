@@ -200,12 +200,23 @@ class IndirectBitPredictor(BitPredictor):
         map_size: int = 1 << 22,
         lr: float = 0.1,
         history_window: int = 2,
+        byte_indices: tuple[int, ...] | None = None,
     ) -> None:
         from .state import NEXT_STATE, INIT_PREDICTION
         self.context_fn = context_fn
         self.map_size = int(map_size)
         self.lr = float(lr)
         self.history_window = int(history_window)
+        # byte_indices: negative offsets into history for context computation.
+        # Default uses last `history_window` consecutive bytes.
+        # Sparse example: (-1, -3) → use last byte + 3rd-back byte, skipping
+        # the 2nd-back byte. (-1, -4) → skip 2 bytes between. Etc.
+        if byte_indices is None:
+            byte_indices = tuple(-i for i in range(history_window, 0, -1))
+            # i.e., for history_window=3: (-3, -2, -1) — most-recent at end
+        self.byte_indices = tuple(byte_indices)
+        # Required history depth = max |negative index|
+        self._history_needed = max(abs(i) for i in self.byte_indices)
         self._next_state = NEXT_STATE
         # Local predictions[state]: per-state EMA estimate of p(bit=1)
         self._predictions = INIT_PREDICTION.copy()
@@ -217,13 +228,20 @@ class IndirectBitPredictor(BitPredictor):
         self._map_index: int = 0
 
     def _byte_context_hash(self) -> int:
-        """Hash the recent byte history into a slot offset. v0: pack last
-        `history_window` bytes, take mod map_size.
+        """Hash the configured byte_indices of recent history into a slot offset.
+
+        Default (contiguous): last `history_window` bytes packed in order.
+        Sparse: byte_indices like (-1, -3) pack only those positions, ignoring
+        the in-between bytes — captures skip-n-gram regularities.
+
+        Missing history (early in stream) is treated as zero — same as v0.
         """
         h = 0
-        # Use last N bytes; pad with 0 if history is shorter than window
-        tail = self._history[-self.history_window:]
-        for b in tail:
+        hist_len = len(self._history)
+        for idx in self.byte_indices:
+            # idx is negative. -1 = last, -2 = second-to-last, etc.
+            pos = hist_len + idx
+            b = self._history[pos] if 0 <= pos < hist_len else 0
             h = ((h << 8) | b) & 0xFFFFFFFF
         # Mix high bits via multiplication for better distribution at small maps
         h = (h * 2654435761) & 0xFFFFFFFF
@@ -249,9 +267,10 @@ class IndirectBitPredictor(BitPredictor):
 
     def commit_byte(self, byte: int) -> None:
         self._history.append(byte)
-        # Cap history to what's needed (small + 1 slot for safety)
-        if len(self._history) > self.history_window + 8:
-            self._history = self._history[-self.history_window:]
+        # Cap history to what's needed by byte_indices (small + 1 slot for safety)
+        cap = self._history_needed + 8
+        if len(self._history) > cap:
+            self._history = self._history[-self._history_needed:]
 
 
 class MultiBitPredictor(BitPredictor):
