@@ -4,6 +4,122 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-019 — 2026-05-16 — WRT preprocessing → bit-level mix — 100KB null, 1MB pending
+
+**Hypothesis:** EXPT-004/005 earlier today showed WRT preprocessing was a
+null on the BYTE-level Phase 1 codec — byte-level predictors can't model
+WRT escape codes (look like noise to Markov / match models). With bit-level
++ multi-Indirect + tuner, the Indirect maps re-learn distributions from
+scratch — they may handle WRT-encoded byte streams better.
+
+**Method:** `expt_wrt_bit.py` — build WRT dictionary (315 entries: 59
+single-byte codes + 256 two-byte prefix), encode `wrt(data)` with the
+EXPT-012 baseline stack (4 children + tuner), compare vs raw bit-mix encode.
+Honest accounting includes dictionary overhead (~2.6 KB serialized).
+
+**Result on 100KB enwik8:**
+
+| Path | Bytes (excl dict) | + dict | vs raw |
+|---|---|---|---|
+| raw (no WRT) | 30,926 | — | baseline |
+| WRT → bit-mix | 30,065 | 32,725 | **+5.8% worse** with dict overhead |
+
+WRT preprocessing reduced input from 100,000 → 75,417 bytes (−24.6%). The
+bit-mix then compressed it to 30,065 bytes — slightly more compact than
+raw at 30,926. BUT the dictionary overhead (2,660 bytes) wipes out the gain.
+
+**Important shift from EXPT-004/005:** previously WRT-encoded bytes COULDN'T
+be compressed well by the byte-level Phase 1 codec (escape codes were
+adversarial). NOW the bit-level multi-Indirect handles WRT bytes acceptably —
+the per-context state machines re-learn whatever byte distribution is
+presented. So WRT is no longer architecturally hostile to track-b.
+
+**Verdict on 100KB: NULL.** The dictionary overhead is a 2.6%-of-corpus
+fixed cost at this scale. Amortized over 1MB it's 0.26%; over 100MB it's
+0.0026%. So the result reverses with scale.
+
+**1MB pending — will amend when Monitor fires.** Expected: WRT wins by
+~1-2% at 1MB once overhead becomes negligible.
+
+**Artefacts:**
+- `option_a/expt_wrt_bit.py` (140 LOC)
+- Reuses `option_a/wrt.py` from EXPT-004 (built 315-entry dictionary)
+
+**References:**
+- Skibinski "Word Replacement Transform" original
+- Earlier EXPT-004/005 entries below for the byte-level null context
+
+---
+
+## EXPT-018 — 2026-05-16 — Bigger Indirect maps — IN FLIGHT
+
+**Hypothesis:** EXPT-009 found 1<<24 (16 MB) beat 1<<22 (4 MB) on 100KB.
+At 1MB each slot in a 1<<24 map gets ~0.5 updates — collisions still common.
+Going to 1<<26 (64 MB), 1<<27 (128 MB) should reduce collisions further.
+Diminishing returns expected; null possible (collisions are noise the
+state machine + EMA already smooth out).
+
+**Method:** `expt_big_maps.py` — sweep map_size_bits ∈ {24, 25, 26, 27} for
+the hist=3 Indirect in the EXPT-014 baseline stack. Hist=2 / hist=1 stay at
+1<<22 / 1<<20 (fixed). Tune weights then encode.
+
+**Result on 1MB:** in flight; Monitor armed.
+
+**Memory cost:** at 1<<27 = 128 MB per single Indirect. Four-children stack
+at this size = ~150+ MB of map memory. Mac has 32 GB — fine. VPS at 31 GB
+also fine. Cython port wouldn't need to inflate.
+
+**Artefacts:**
+- `option_a/expt_big_maps.py` (130 LOC)
+
+---
+
+## EXPT-016 — 2026-05-16 — SSE as a SIBLING predictor — REDUX OF EXPT-013, WINS
+
+**Hypothesis:** EXPT-013 tried SSE as a POST-MIX wrapper → +2-6% WORSE than
+baseline. The wrapper forces a remap whether useful or not. The PAQ pattern
+is to use SSE as an ADDITIONAL CHILD in the mix; the tuner then assigns it
+a weight. If SSE adds signal, weight is high; if not, weight is near zero.
+
+**Method:** `expt_sse_sibling.py` — `SSEPredictor` wraps a FRESH
+`BytewiseBitPredictor` over Phase 1 and applies an SSE remap (2048 contexts
+keyed on bit_pos × last_byte). This SSE-wrapped predictor goes into the
+MultiBitPredictor as a 5th child alongside the existing 4. Tune all 5
+weights, then encode.
+
+**Result on 100KB enwik8:**
+
+| Stack | Bytes | bpb | vs gzip-9 | vs baseline |
+|---|---|---|---|---|
+| baseline (4 children, no SSE) | 30,926 | 2.4741 | −14.66% | — |
+| **+ SSE-sibling (5 children)** | **30,418** | **2.4334** | **−16.06%** | **−1.64%** |
+
+Tuned weights for 5-child stack: `[0.246, 0.174, 0.181, 0.139, 0.4]`.
+The SSE-sibling got the HIGHEST weight (0.4) in the stack — even higher
+than Phase 1 (0.246). The tuner rebalanced Phase 1 down because the
+SSE-sibling already wraps Phase 1's signal in remapped form. Net: SSE adds
+~1.6% by capturing a NON-LINEAR calibration of Phase 1's bit predictions
+that the linear logit mix can't.
+
+All variants byte-exact roundtrip ✓.
+
+**Verdict: WORKS as sibling, was wrong as wrapper.** This is the EXPT-013
+salvage: SSE has signal, but the architecture must let the tuner choose
+how much. The wrapper-form pre-decides. The sibling-form discovers.
+
+**1MB pending** — Monitor armed. Expected: similar ~1-2% gain over EXPT-012
+baseline at 1MB, since the per-context SSE table populates faster on 1MB.
+
+**Artefacts:**
+- `option_a/expt_sse_sibling.py` (140 LOC): SSEPredictor class + harness
+- Reuses `option_a/apm.py` SSEModel from EXPT-013
+
+**References:**
+- EXPT-013 above (the wrapper-form null that prompted this rework)
+- PAQ8 APM-as-additional-predictor pattern
+
+---
+
 ## EXPT-013 — 2026-05-16 — APM/SSE final-stage remap — NULL RESULT (v0)
 
 **Hypothesis:** Eugene Shelwien's APM/SSE (per-context 7-bin probability
