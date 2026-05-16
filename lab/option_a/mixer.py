@@ -85,34 +85,46 @@ def multi_mix_geometric(predictors: Sequence[Predictor]) -> Tuple[List[int], int
     return cum, total_cum
 
 
+DEFAULT_AC_PRECISION = 1_000_000     # ~2^20, v0.3cy baseline
+HIGH_AC_PRECISION = 16_777_216       # 2^24, Nacrith recommendation
+
+# AC range coder operates at 32-bit precision (WHOLE = 2^32).
+# Safety constraint: WHOLE > 4 * cum_total. At 2^24, 4*cum_total = 2^26,
+# WHOLE/4*cum_total = 64x headroom. At 2^30 we'd hit the cliff.
+MAX_AC_PRECISION = 1 << 30
+
+
 def multi_mix_logistic(
     predictors: Sequence[Predictor],
     weights: Optional[Sequence[float]] = None,
+    precision: int = DEFAULT_AC_PRECISION,
 ) -> Tuple[List[int], int]:
     """Logistic mix: weighted sum of log-probabilities, then exponentiate.
 
     Mathematically: P(x) ∝ exp(Σ w_i · log p_i(x))
 
     When all weights equal 1 and predictors share a uniform Laplace floor,
-    this collapses to the geometric mean (same as multi_mix_geometric).
-    With per-predictor weights, predictors can be given more or less voice
-    in the joint distribution — the basis for adaptive mixing in Phase 1.
+    this collapses to the geometric mean (same as multi_mix_geometric) up
+    to AC quantisation noise.
 
     Args:
-        predictors: list of Predictor instances (first is treated identically
-                    to the rest in logistic mix; no special "base" role)
-        weights: optional sequence of float weights, one per predictor. If
-                 None, all weights default to 1.0 (= geometric mean).
+        predictors: list of Predictor instances
+        weights: optional per-predictor weights (default uniform 1.0)
+        precision: AC cum-freq scale. Default 1e6 (v0.3cy baseline). Pass
+                   HIGH_AC_PRECISION = 16_777_216 (2^24) for Nacrith-style
+                   reduced quantisation overhead (~0.05-0.15 bpb improvement
+                   on text per arXiv:2602.19626).
 
     Returns:
-        Same shape as multi_mix_geometric.
+        (cum_freqs: list[int] of length 257, total_cum: int)
 
-    Note: this is NOT byte-exact with multi_mix_geometric even at uniform
-    weights because the math path is different (log-domain vs multiply-renorm).
-    Use multi_mix_geometric for v0.3cy parity verification.
+    Note: NOT byte-exact with multi_mix_geometric — different math path.
     """
     n = len(predictors)
     assert n >= 1, "need at least one predictor"
+    assert 256 <= precision <= MAX_AC_PRECISION, (
+        f"precision {precision} out of safe range [256, {MAX_AC_PRECISION}]"
+    )
 
     if weights is None:
         weights = [1.0] * n
@@ -123,7 +135,7 @@ def multi_mix_logistic(
     # Log-domain accumulation with weight
     log_p = np.zeros(ALPHA, dtype=np.float64)
     for (counts, total), w in zip(preds, weights):
-        # log p_i(x) = log(count_i(x) / total_i)  [with Laplace floor ensuring no zeros]
+        # log p_i(x) = log(count_i(x) / total_i)  [Laplace floor ensures no zeros]
         log_p += w * (np.log(counts.astype(np.float64)) - np.log(float(total)))
 
     # Exponentiate + normalise. Subtract max for numerical stability.
@@ -131,7 +143,7 @@ def multi_mix_logistic(
     p_mixed = np.exp(log_p)
     p_mixed /= np.add.reduce(p_mixed)
 
-    counts_int = np.maximum(1, np.round(p_mixed * 1_000_000.0)).astype(np.uint64)
+    counts_int = np.maximum(1, np.round(p_mixed * float(precision))).astype(np.uint64)
     cum = [0] * (ALPHA + 1)
     total_cum = 0
     for i in range(ALPHA):
@@ -142,4 +154,10 @@ def multi_mix_logistic(
 
 
 # Re-export for convenience
-__all__ = ["multi_mix_geometric", "multi_mix_logistic", "LAPLACE_FLOOR"]
+__all__ = [
+    "multi_mix_geometric",
+    "multi_mix_logistic",
+    "LAPLACE_FLOOR",
+    "DEFAULT_AC_PRECISION",
+    "HIGH_AC_PRECISION",
+]
