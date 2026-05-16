@@ -4,6 +4,122 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-005 — 2026-05-16 — WRT selectivity sweep (min_word_len 3..8)
+
+**Hypothesis:** EXPT-004 showed WRT v0 was a wash because we were replacing
+short common words ("the", "and") that track-B's predictor already compressed
+to <1 byte each. The substitute bytes are novel → predictor starts cold →
+net loss. If we only substitute LONG words (where the predictor was costing
+>1 byte/char), the substitution becomes net positive. Sweep K = min_word_len
+from 3 to 8 to find the crossover.
+
+**Method:** `expt_wrt_sweep.py 100000`. Build dict with min_word_len=K for each
+K, encode raw → wrt → track-B geometric, compare blob size to raw → track-B.
+Verify full-pipeline roundtrip at each K.
+
+**Result:**
+
+| K | dict | match % | wrt_size | tb_size | tb_bpb | vs raw |
+|---|---|---|---|---|---|---|
+| 3 | 315 | 41.7% | 75,417 | 38,407 | 3.0726 | **+2.41%** |
+| 4 | 315 | 30.7% | 77,534 | 38,025 | 3.0420 | +1.40% |
+| 5 | 315 | 22.9% | 79,740 | 37,750 | 3.0200 | +0.66% |
+| 6 | 315 | 19.9% | 80,699 | 37,578 | 3.0062 | +0.20% |
+| 7 | 315 | 17.4% | 81,897 | 37,518 | 3.0014 | +0.04% |
+| 8 | 315 | 14.8% | 83,347 | 37,378 | 2.9902 | **−0.33%** |
+
+**Strictly monotonic.** Every short word we DON'T replace, track-B compresses better.
+
+**Verdict:** PASS at K=8 (net positive but tiny) — confirms the thesis. PRINCIPLE
+WIN, NOT BPB WIN. Result establishes that the literature claim (cmix gets 5-10%
+from WRT) is dominated by *architecture-aware integration* (bracket-context
+predictor handles substitute bytes specifically), NOT the substitution mechanism
+itself. v0 WRT without integration cannot deliver more than ~0.3% on track-B.
+
+**Strategic implication for Phase 2:** preprocessing won't get us to Hutter-class.
+The path to 1.0 bpb runs through making the predictor SEE MORE PATTERNS:
+- Longer match contexts (Match-16 already +0.337% in EXPT-003 — keep)
+- Bit-level prediction (unlocks indirect contexts + APM/SSE)
+- Sparse contexts (skip-n-gram tables)
+- Eventually: small neural predictor (L3TC RWKV-12M path) feeding logits into AC
+
+The Hotz/Hutter framing predicted exactly this: **you can't fake a probability
+distribution. The arithmetic coder ratifies whether the model knows the data.**
+Phase 1's -2.6% was a real intelligence gain (smarter weights). EXPT-002,
+EXPT-004 didn't move because they didn't make the predictor smarter — they
+just rearranged the input.
+
+**Decision:** Phase 2 priorities rewritten:
+- 2A (deferred): WRT integration with architecture-aware predictor — defer until
+  bit-level refactor lands (it'll be cleaner then)
+- 2B (next): bit-level codec refactor — prerequisite for indirect contexts + APM
+- 2C: indirect context model + nonstationary state map (cmix path, 3-7% expected)
+- 2D: APM/SSE final stage (1-2%)
+- 2E: add Match-16 to default factory (already validated +0.337% in EXPT-003)
+
+**Artefacts:**
+- `option_a/wrt.py` — now parameterised on `min_word_len`
+- `option_a/expt_wrt_sweep.py` — sweep harness, full-pipeline roundtrip verified
+
+---
+
+## EXPT-004 — 2026-05-16 — WRT v0 preprocessing impact (315-entry self-trained dict)
+
+**Hypothesis:** Skibinski WRT preprocessing pass before track-B encode will shrink
+blob size by 3-10% per literature (cmix uses ~80k-entry dict). v0 uses a self-trained
+dict of 315 entries (59 single-byte codes + 256 two-byte prefix codes), built from
+the 1MB enwik8 prefix. Tokenisation: `[A-Za-z]+`. No case folding, no q-gram tricks.
+
+**Method:** `expt_wrt.py 100000`. Pipeline: `raw → encode_wrt → wrt_data → track-B encode`.
+Roundtrip verify full pipeline (track-B decode → decode_wrt → raw). Compare against
+raw track-B (both geometric and tuned-logistic configs).
+
+**Result:**
+| Pipeline | Bytes | bpb | vs raw geometric |
+|---|---|---|---|
+| gzip-9 (raw) | 36,239 | 2.8991 | baseline |
+| track-B geometric (raw) | 37,502 | 3.0002 | 0% |
+| track-B tuned (raw) | 36,511 | 2.9209 | −2.64% |
+| track-B geometric (WRT) | 38,407 | 3.0726 | **+2.41% (WORSE)** |
+| track-B tuned (WRT) | 36,433 | 2.9146 | −2.85% |
+
+WRT alone shrinks raw 100KB → 75.4KB (24.6% raw-byte reduction, 41.7% word-match rate).
+gzip-9 on WRT(raw) = 34,432 bytes (−5.0% vs gzip-9 on raw). The mechanism *works*.
+
+But track-B's gain over its own raw-tuned baseline: **+0.21%**. Below 3% gate.
+
+**Why the mechanism doesn't transfer to track-B as-is:**
+WRT replaces "the" → one absent byte (e.g. 0x01). track-B's Markov(order-3) and
+Match predictors had learned strong patterns for "the" and similar high-freq words.
+Substitute bytes 0x01-0x1F are never seen in raw enwik8 → predictors start cold
+for every preprocessed encoding. WRT + geometric is +2.4% WORSE than raw + geometric
+for exactly this reason.
+
+The tuned-logistic mixer recovers most of the loss because the SGD adapts weights
+to the new byte distribution (Match-8 weight 0.55 → 1.64 as long-context patterns
+take over from order-3). But the recovery only gets us 0.21% past raw-tuned.
+
+**Architecture-aware integration is what unlocks WRT.** cmix wraps WRT codes with
+a `bracket-context` model that has a specific predictor for the escape bytes. Without
+that, WRT is a wash on small dicts and small slices.
+
+**Verdict:** FAIL on this gate but VALUABLE NULL. Two follow-up paths:
+1. v1: extend to 3-byte prefix codes (65k+ entries) — match real Skibinski capacity
+2. Add an architecture-aware predictor for WRT codes (bracket-context analog) —
+   bigger refactor, larger ceiling
+
+**Decision:** Try v1 (capacity expansion) before committing to architecture-aware
+integration. If 65k-entry dict on 1MB enwik8 still gives <2% net gain, the
+binding constraint is integration, not capacity.
+
+**Artefacts:**
+- `option_a/wrt.py` — encode/decode + roundtrip verification (315-entry dict)
+- `option_a/expt_wrt.py` — full-pipeline comparison harness
+
+**Reference:** cmix `preprocess/dictionary.cpp`, XWRT (Skibinski et al. 2005-2007)
+
+---
+
 **Baseline state at log open (2026-05-16):**
 - Architecture: 5 predictors (Markov, Match{3,5,8,12}) + geometric mixer + arithmetic coder
 - v0.3cy parity: byte-exact between pure-Python `option_a/` and Cython `mixer_multi_cy`
