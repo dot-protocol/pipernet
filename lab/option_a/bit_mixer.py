@@ -254,6 +254,77 @@ class IndirectBitPredictor(BitPredictor):
             self._history = self._history[-self.history_window:]
 
 
+class MultiBitPredictor(BitPredictor):
+    """Composite bit predictor: mixes multiple BitPredictors via logistic combine.
+
+    Architecture (PAQ/cmix-style bit-level mixer):
+      - Holds a list of BitPredictors (children).
+      - Per bit: each child returns p_i = p(bit=1) ∈ (0, 1).
+      - Combine: logit_i = log(p_i / (1 - p_i)); final_p = sigmoid(Σ w_i · logit_i).
+      - Update: forward bit observation to each child's update_bit().
+      - Per byte: forward start_byte / commit_byte to all children.
+
+    Weights are fixed at construction (v0). Phase 2D-mix-tune (EXPT-011) will
+    learn them online with the same SGD pattern from Phase 1.
+
+    Numerical guard: clamp p_i ∈ [eps, 1-eps] before logit to avoid ±∞.
+    """
+
+    EPS = 1e-6
+
+    def __init__(self, children: list[BitPredictor], weights: list[float] | None = None) -> None:
+        self.children = list(children)
+        if weights is None:
+            weights = [1.0] * len(self.children)
+        assert len(weights) == len(self.children), \
+            f"weights ({len(weights)}) must match children ({len(self.children)})"
+        import numpy as np
+        self.weights = np.asarray(weights, dtype=np.float64)
+
+    def start_byte(self) -> None:
+        for c in self.children:
+            c.start_byte()
+
+    def predict_bit(self, bit_context: int, k: int) -> float:
+        import math
+        # Collect each child's p_one, convert to logit, weighted-sum, sigmoid
+        s = 0.0
+        for c, w in zip(self.children, self.weights):
+            p = c.predict_bit(bit_context, k)
+            # Clamp to (eps, 1-eps) for stable logit
+            if p < self.EPS:
+                p = self.EPS
+            elif p > 1.0 - self.EPS:
+                p = 1.0 - self.EPS
+            s += float(w) * math.log(p / (1.0 - p))
+        # Sigmoid with overflow guard
+        if s >= 700:
+            return 1.0 - self.EPS
+        if s <= -700:
+            return self.EPS
+        import math
+        return 1.0 / (1.0 + math.exp(-s))
+
+    def update_bit(self, bit: int, bit_context: int, k: int) -> None:
+        for c in self.children:
+            c.update_bit(bit, bit_context, k)
+
+    def commit_byte(self, byte: int) -> None:
+        for c in self.children:
+            c.commit_byte(byte)
+
+
+def make_multi_factory(child_factories: list, weights: list[float] | None = None):
+    """Factory: returns a function that builds a fresh MultiBitPredictor.
+
+    Each child_factory is a zero-arg callable returning a BitPredictor.
+    """
+    def factory() -> MultiBitPredictor:
+        children = [cf() for cf in child_factories]
+        return MultiBitPredictor(children, weights=weights)
+    return factory
+
+
 def make_indirect_factory(
     map_size: int = 1 << 22,
     lr: float = 0.1,
@@ -274,7 +345,9 @@ __all__ = [
     "BitPredictor",
     "BytewiseBitPredictor",
     "IndirectBitPredictor",
+    "MultiBitPredictor",
     "make_bytewise_bit_factory",
     "make_indirect_factory",
+    "make_multi_factory",
     "_bit_interval",
 ]

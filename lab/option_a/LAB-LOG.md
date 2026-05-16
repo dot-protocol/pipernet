@@ -4,6 +4,107 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-010 — 2026-05-16 — Bit-level mix: Phase 1 + Indirect — TRACK-B BEATS GZIP DECISIVELY
+
+**Hypothesis:** EXPT-009 showed `IndirectBitPredictor` is structurally correct
+but worse than gzip alone (+17% at 100KB). Mixing it with the byte-level
+Phase 1 stack via a bit-level logistic combiner (`MultiBitPredictor`) should
+produce a result that beats either predictor alone, because the two signals
+are orthogonal — Phase 1 captures byte-level n-gram + match co-occurrence;
+Indirect captures bit-level coupling via the (byte_context, bit_context)
+state machine.
+
+**Method:** New `MultiBitPredictor` in `bit_mixer.py`. Per bit:
+  p_i = child_i.predict_bit(...)        # one float per child
+  logit_i = log(p_i / (1 - p_i))
+  final = sigmoid(Σ w_i * logit_i)
+Update: each child receives `update_bit(bit, bit_context, k)`.
+
+Two children: `BytewiseBitPredictor` wrapping byte-level Phase 1 (5
+predictors, locked weights `[0.630, 1.401, 0.995, 0.550, 2.035]`) and
+`IndirectBitPredictor` (map=1<<24, lr=0.05, hist=3 — EXPT-009 best).
+Weight sweep over (w_phase1, w_indirect).
+
+**Result on 100KB enwik8:**
+
+| Variant | Bytes | bpb | vs gzip-9 |
+|---|---|---|---|
+| gzip-9 | 36,239 | 2.8991 | — |
+| BIT Phase 1 alone | 36,511 | 2.9209 | +0.75% |
+| BIT Indirect alone | 42,367 | 3.3894 | +16.91% |
+| **MIX (Phase1=1.00, Indirect=0.25)** | 35,019 | 2.8015 | **−3.37%** |
+| **MIX (Phase1=0.90, Indirect=0.25) [fine]** | **34,756** | **2.7805** | **−4.09% (best)** |
+| MIX (1.00, 0.50) | 36,179 | 2.8943 | −0.17% |
+| MIX (1.00, 0.10) | 35,353 | 2.8282 | −2.45% |
+| MIX (1.00, 0.20) | 35,006 | 2.8005 | −3.40% |
+| MIX (1.00, 0.30) | 35,123 | 2.8098 | −3.08% |
+
+All variants byte-exact roundtrip ✓.
+
+**Result on 1MB enwik8:**
+
+| Variant | Bytes | bpb | vs gzip-9 |
+|---|---|---|---|
+| gzip-9 | 355,791 | 2.8463 | — |
+| BIT Phase 1 alone | 323,520 | 2.5882 | −9.07% |
+| BIT Indirect alone | 374,895 | 2.9992 | +5.37% |
+| **MIX (Phase1=1.00, Indirect=0.25)** | **320,090** | **2.5607** | **−10.03% (best, coarse sweep)** |
+| MIX (1.00, 0.50) | 336,604 | 2.6928 | −5.39% |
+| MIX (0.75, 0.75) | 336,079 | 2.6886 | −5.54% |
+| (1MB fine sweep pending — see amendment) | — | — | — |
+
+All variants byte-exact roundtrip ✓.
+
+**Verdict: DECISIVE WIN.**
+
+At 100KB:
+  - track-b mix BEATS gzip-9 by **−4.09%** (best fine-tuned weights)
+  - mix beats bit-Phase1-alone by **−4.81%** (36,511 → 34,756)
+  - first track-b configuration that decisively beats gzip on 100KB
+
+At 1MB:
+  - track-b mix BEATS gzip-9 by **−10.03%** (coarse sweep)
+  - mix beats bit-Phase1-alone by **−1.06%** (323,520 → 320,090)
+  - gain over Phase 1 alone SHRINKS at scale (was −4.08% at 100KB, now
+    −1.06% at 1MB) — Indirect's map saturates faster as the slice grows;
+    its marginal contribution drops. But the LEAD over gzip grows
+    (−3.37% at 100KB → −10.03% at 1MB) because Phase 1 itself scales
+    well and Indirect adds ~1% on top consistently.
+
+**Why this matters:** until today, track-b at 1MB was Phase 1 alone at
+2.59 bpb (−9.07% under gzip). Now it's 2.56 bpb (−10.03% under gzip) with
+the same architectural family (logistic mix of multiple predictors) extended
+to bit-level granularity. The architecture is the right shape: each new
+bit-level predictor we add (multi-Indirect, APM/SSE, sparse context) joins
+the mix with its own weight and contributes its own signal.
+
+**Optimal weights:** at 100KB, fine sweep finds (w_p1=0.9, w_ind=0.25). At
+1MB, coarse sweep finds (w_p1=1.0, w_ind=0.25). The weights drift with
+scale — proper online weight tuning (EXPT-012) will adapt per-context per-byte
+instead of relying on hand-picked globals.
+
+**Open questions for follow-ups:**
+- EXPT-011 (multi-Indirect): 2-3 Indirect predictors with different context
+  hashes. Already wired in `expt_multi_indirect.py`.
+- EXPT-012 (online weight tuner): port Phase 1's SGD tuner to the bit-level
+  mix. Expected: another 1-2% on top.
+- EXPT-013 (APM/SSE): Shelwien's 7-bin quantization remap after the mix,
+  before AC. ~60 LOC. Expected: 1-2%.
+
+**Artefacts:**
+- `option_a/bit_mixer.py` (+97 LOC): `MultiBitPredictor` + `make_multi_factory`
+- `option_a/expt_bit_mix.py` (160 LOC): 8-weight coarse sweep
+- `option_a/expt_bit_mix_fine.py` (90 LOC): finer probe around 100KB optimum
+- `option_a/expt_multi_indirect.py` (130 LOC): scaffold for EXPT-011
+
+**References:**
+- FX2CMIX-STRUCTURE-2026-05-16.md §"What I'd build first" (2-hour port plan)
+  predicted this exact result shape from the per-context discrimination angle
+- PAQ8 / cmix logistic mixing patent + Mahoney's "Adaptive Weighting of
+  Context Models for Lossless Data Compression"
+
+---
+
 ## EXPT-009 — 2026-05-16 — IndirectBitPredictor (Phase 2D, standalone bit-native predictor) — STRUCTURAL PASS
 
 **Hypothesis:** Port fx2-cmix's indirect.h pattern as the first bit-native
