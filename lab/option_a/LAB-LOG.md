@@ -4,7 +4,88 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
-## EXPT-006 — 2026-05-16 — Per-context mixer weights (fx2-cmix port)
+## EXPT-007 — 2026-05-16 — Per-context mixer at 1MB scale + variant sweep — REVERSES EXPT-006
+
+**Hypothesis:** EXPT-006's per-context mixer gain (-3.5% on 100KB) should
+hold or grow at 1MB scale, since each context gets ~10× more updates. If
+the gain shrinks, the warm-start was wrong; if it inverts, the per-context
+architecture itself doesn't help at our context cardinality (256 slots).
+
+**Method:** `expt_per_context_v2.py 1000000`. Refit Phase 1 global weights
+on 1MB first (instead of using 100KB-trained warm-start), then sweep
+per-context variants:
+- A: lr=0.05, clip=5 (EXPT-006 settings)
+- B: lr=0.005, clip=5 (slower drift)
+- C: lr=0.05, clip=2 (tighter clip)
+- D: lr=0.001, clip=5 (slowest drift)
+
+All warm-started from refit Phase 1 global. Roundtrip verified each.
+
+**Result on 1MB enwik8:**
+
+| Pipeline | Bytes | bpb | vs refit Phase 1 | vs gzip-9 |
+|---|---|---|---|---|
+| gzip-9 | 355,791 | 2.8463 | — | 0% |
+| track-B geometric | 338,769 | 2.7102 | +4.73% | −4.78% |
+| **track-B refit Phase 1 global** | **323,469** | **2.5878** | **0% (baseline)** | **−9.09%** |
+| Per-context A (lr=0.05, clip=5) | 328,829 | 2.6306 | +1.66% | −7.58% |
+| Per-context B (lr=0.005, clip=5) | 327,761 | 2.6221 | +1.33% | −7.88% |
+| Per-context C (lr=0.05, clip=2) | 326,710 | 2.6137 | +1.00% | −8.18% |
+| Per-context D (lr=0.001, clip=5) | 324,601 | 2.5968 | +0.35% | −8.77% |
+
+**Refit Phase 1 weights on 1MB:** `[0.629, 1.400, 0.995, 0.550, 2.035]` —
+essentially identical to the 100KB-trained weights. The global optimum is real
+and stable across scales.
+
+**Verdict: EXPT-006 OVERTURNED.** Per-context at 256-slot granularity does not
+scale. Variant D (lr=0.001) recovers nearest-to-global by minimising per-context
+drift, but cannot improve on it.
+
+**Why:** fx2-cmix's per-context mixer uses up to 10,000 unique 64-bit context
+hashes incorporating bit-level state + many predictor outputs. Our 256-slot
+"last byte" hash averages over too many heterogeneous behaviors per slot.
+At 100KB, lucky overfitting masked this; at 1MB the noise floor of per-context
+updates dominates the discrimination signal.
+
+**The honest upside:** at 1MB scale, **Phase 1 global ALONE is −9.1% under
+gzip-9** (323,469 vs 355,791). track-B was already winning at real-corpus scale;
+EXPT-001's measurement on 100KB just looked worse than it was. The per-context
+gain on 100KB was 100KB-specific, but Phase 1 global wins ARE real and scale.
+
+**Decision:** Drop per-context from default for now. Revert SOTA to Phase 1
+global tuned weights. Per-context discrimination remains a future move BUT
+requires (a) bit-level features and (b) high-cardinality hashing (10k+ slots) —
+which means the bit-level codec refactor is the gateway, not a hack at byte level.
+
+**Phase 2 sequence corrected:**
+
+| Phase | Move | Status |
+|---|---|---|
+| 2A | AC precision | NULL (EXPT-002) |
+| 2B | ~~Per-context (256-slot, byte-level)~~ | **REVERTED (EXPT-007)** |
+| 2B' | Confirm Phase 1 global is corrected SOTA at scale | DONE — 1MB = −9.1% vs gzip |
+| 2C | Bit-level codec refactor | NEXT — gateway to 2D, 2E, real per-context |
+| 2D | Indirect context model (cmix-style) | 3-7% expected |
+| 2E | APM/SSE final stage | 1-2% expected |
+| 2F | Per-context dispatch with 10k+ bit-level hashes | enabled by 2C+2D |
+
+**Artefacts:**
+- `option_a/expt_per_context_v2.py` — variant sweep harness
+- LAB-LOG.md — EXPT-006 status downgraded; EXPT-007 logged with corrected SOTA
+
+**Reference:** FX2CMIX-STRUCTURE-2026-05-16.md §1 explains why 256-slot byte-level
+context is too coarse to capture what fx2-cmix's 64-bit hashes are doing.
+
+---
+
+## EXPT-006 — 2026-05-16 — Per-context mixer weights (fx2-cmix port) — 100KB ONLY, OVERTURNED BY EXPT-007
+
+**STATUS UPDATE (post-EXPT-007):** This experiment showed −3.5% on 100KB but
++0.35-1.7% (LOSS) on 1MB across all variant settings. The 100KB result was a
+small-sample-size artifact. See EXPT-007 above for the corrected SOTA and
+reasoning. ORIGINAL ENTRY PRESERVED BELOW for the audit trail.
+
+---
 
 **Hypothesis:** fx2-cmix's `Mixer::GetContextData()` stores weights PER unique
 context hash (up to 10,000 distinct contexts). This is the single biggest source
