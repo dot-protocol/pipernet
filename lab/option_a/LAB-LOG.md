@@ -4,6 +4,85 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-009 — 2026-05-16 — IndirectBitPredictor (Phase 2D, standalone bit-native predictor) — STRUCTURAL PASS
+
+**Hypothesis:** Port fx2-cmix's indirect.h pattern as the first bit-native
+predictor in track-b. Shared map (byte array) keyed on (byte_context,
+bit_context) holds state bytes; local predictions[] indexed by state gives
+p(bit=1); on each bit observation, EMA-update predictions[state] and advance
+state via `NEXT_STATE` table.
+
+If the port is structurally correct, standalone Indirect should compress
+the corpus measurably better than the uniform predictor (8 bpb) — even
+without help from byte-level Markov/match models. ~3.5–5.0 bpb on enwik8
+100KB is the target band (Phase 1 with 5 predictors lands at 2.92 bpb;
+single Indirect can't match that yet).
+
+**Method:** `expt_indirect.py [SLICE_BYTES]`. Drives `bit_codec.bit_encode`
+with ONLY an `IndirectBitPredictor`. State machine in `state.py`: 256 states
+encoding (count_of_1s, count_of_0s) capped at 15 each, nonstationary halving
+when both saturated, Laplace prior on initial predictions. Sweep:
+- map_size ∈ {1<<20, 1<<22, 1<<24} (1, 4, 16 MB)
+- lr ∈ {0.05, 0.1, 0.2}
+- history_window ∈ {1, 2, 3} bytes for context hash
+
+**Result on 100KB enwik8 (best variants):**
+
+| Variant | Bytes | bpb | vs gzip-9 |
+|---|---|---|---|
+| uniform (8 bpb baseline) | 100,000 | 8.0000 | — |
+| **gzip-9** | **36,239** | **2.8991** | **baseline** |
+| byte-level Phase 1 (reference) | 36,510 | 2.9208 | +0.7% |
+| Indirect (1<<24, lr=0.05, hist=3) | 42,367 | 3.3894 | +16.9% (BEST) |
+| Indirect (1<<24, lr=0.05, hist=2) | 43,325 | 3.4660 | +19.6% |
+| Indirect (1<<20, lr=0.05, hist=3) | 43,362 | 3.4690 | +19.7% |
+| Indirect (1<<24, lr=0.05, hist=1) | 53,370 | 4.2696 | +47.3% |
+
+**Roundtrip:** all 19 sweep variants verified byte-exact ✓.
+
+**Verdict: STRUCTURAL PASS.** The port is correct. Indirect alone is +16.9%
+worse than gzip — exactly as expected for ONE predictor doing the work that
+Phase 1 spreads across 5. The architecture works: it learns the byte
+distribution via state-byte transitions and EMA, scales with map size
+(1<<24 > 1<<22 > 1<<20), and prefers small lr + longer history (consistent
+with cmix/PAQ findings).
+
+**Why this matters:** With Indirect proven byte-exact and structurally
+correct, the architectural toolbox now contains both:
+1. byte-level mixer wrapping (BytewiseBitPredictor) — for the existing Phase 1
+2. bit-native state-machine predictor (IndirectBitPredictor) — new
+
+The next experiment (EXPT-010) mixes them via a bit-level logistic mixer.
+Indirect alone is +16%; Phase 1 alone is +0.7%; the mix should beat Phase 1
+because Indirect adds signal Phase 1's Markov + match models can't capture
+(specifically: bit-level coupling within a byte, which byte-level predictors
+miss by construction).
+
+**Knobs identified:**
+- `map_size`: larger is consistently better up to 1<<24; collisions kill
+  smaller maps at higher history_window. 1<<24 = 16 MB is the v0 default.
+- `lr`: 0.05 wins. Larger rates overshoot rare contexts.
+- `history_window`: 3 > 2 > 1 at 100KB. May invert at 10KB (sparse contexts).
+- `context hash`: currently last-N bytes ⊕ Knuth multiplicative. Better hashes
+  (sparse-skip, last + second-to-last, masked) are EXPT-011+.
+
+**Performance:** ~1.3s encode + 1.6s decode for 100KB. Slower per byte than
+BytewiseBitPredictor by ~2× (1.3s vs 0.62s) due to per-bit state lookup.
+Acceptable for the architectural reference; Cython port will erase the gap.
+
+**Artefacts:**
+- `option_a/state.py` (66 LOC): 256-state nonstationary transition table +
+  Laplace-prior prediction table
+- `option_a/bit_mixer.py` (+105 LOC): `IndirectBitPredictor`, `make_indirect_factory`
+- `option_a/bit_codec.py` (+1 LOC): `update_bit(bit, bit_context, k)` hook
+- `option_a/expt_indirect.py` (110 LOC): sweep harness
+
+**References:**
+- `lab/fx2-cmix/src/models/indirect.h` (the 68-LOC original)
+- FX2CMIX-STRUCTURE-2026-05-16.md §"Indirect context model is the biggest port-leverage item"
+
+---
+
 ## EXPT-008 — 2026-05-16 — Bit-level codec baseline (Phase 2C foundation) — EQUIVALENCE GATE PASSED
 
 **Hypothesis:** Wrap the byte-level mixer inside a bit-level codec

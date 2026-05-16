@@ -94,6 +94,7 @@ def bit_encode(
                 encoder.encode_symbol(0, split, precision)
             else:
                 encoder.encode_symbol(split, precision, precision)
+            bit_predictor.update_bit(bit, bit_context, k)
             bit_context = (bit_context << 1) | bit
         bit_predictor.commit_byte(byte)
 
@@ -121,6 +122,7 @@ def bit_decode(
             split = precision - p_one_int
             cum_freqs = [0, split, precision]
             bit = decoder.decode_symbol(cum_freqs, precision)
+            bit_predictor.update_bit(bit, bit_context, k)
             byte = (byte << 1) | bit
             bit_context = (bit_context << 1) | bit
         out.append(byte)

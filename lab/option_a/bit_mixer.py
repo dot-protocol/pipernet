@@ -58,6 +58,17 @@ class BitPredictor(abc.ABC):
     def predict_bit(self, bit_context: int, k: int) -> float:
         """Return p(bit_k = 1) given bit_context and bit position k (0=MSB)."""
 
+    def update_bit(self, bit: int, bit_context: int, k: int) -> None:
+        """Observe the committed bit. Update bit-level state if any.
+
+        Default no-op for byte-wrapping predictors that only need byte-level
+        state. Indirect/APM/per-bit-context predictors override this to
+        advance their state machines on each bit observation.
+
+        bit_context here is the value BEFORE the bit was shifted in; k is
+        the bit position just encoded (0..7, 0=MSB).
+        """
+
     @abc.abstractmethod
     def commit_byte(self, byte: int) -> None:
         """Observe the committed byte. Update internal predictor state."""
@@ -152,9 +163,118 @@ def make_bytewise_bit_factory(
     return factory
 
 
+class IndirectBitPredictor(BitPredictor):
+    """fx2-cmix Indirect-style bit-native predictor.
+
+    Architecture (cmix/PAQ lineage):
+      - Shared `map`: large byte array (~1-16 MB). Each slot holds a state byte
+        encoding (count_of_1s, count_of_0s).
+      - Local `predictions`: 256 floats indexed by state. predictions[s] is
+        the current p(bit=1) estimate for any context that's in state s.
+      - Per-byte: derive a `byte_context` hash (from the byte we're about to
+        predict — or its history), seed `map_index` from that hash.
+      - Per-bit: lookup state at `map[map_index + bit_context]`, predict from
+        predictions[state], then advance state via NEXT_STATE table and EMA-
+        update predictions[state] toward the observed bit.
+
+    Context source: `context_fn(history)` returns the integer byte_context
+    hash for the next byte. v0 uses the last 2 bytes of history → ~65k slots
+    in the map. Richer hashes (order-3, sparse, last+second-to-last) are
+    follow-up experiments.
+
+    Map size: default 1 << 22 = 4 MB. Each slot is 1 byte. With ~65k byte
+    contexts × 256 bit_context positions = 16.7M (slot, bit_ctx) pairs.
+    A 4 MB map at modulo means collisions are common but the state machine
+    is robust to them — each collision is just one extra noisy update.
+
+    Update step (matches fx2-cmix `Perceive(bit)`):
+      addr = (map_index + bit_context) % map_size
+      state = map[addr]
+      predictions[state] += (bit - predictions[state]) * lr
+      map[addr] = NEXT_STATE[state, bit]
+    """
+
+    def __init__(
+        self,
+        context_fn,
+        map_size: int = 1 << 22,
+        lr: float = 0.1,
+        history_window: int = 2,
+    ) -> None:
+        from .state import NEXT_STATE, INIT_PREDICTION
+        self.context_fn = context_fn
+        self.map_size = int(map_size)
+        self.lr = float(lr)
+        self.history_window = int(history_window)
+        self._next_state = NEXT_STATE
+        # Local predictions[state]: per-state EMA estimate of p(bit=1)
+        self._predictions = INIT_PREDICTION.copy()
+        # Shared map: state byte at each slot. Start zeroed (state = (0,0)).
+        self._map = bytearray(self.map_size)
+        # Recent byte history for context computation
+        self._history: list[int] = []
+        # Per-byte snapshot
+        self._map_index: int = 0
+
+    def _byte_context_hash(self) -> int:
+        """Hash the recent byte history into a slot offset. v0: pack last
+        `history_window` bytes, take mod map_size.
+        """
+        h = 0
+        # Use last N bytes; pad with 0 if history is shorter than window
+        tail = self._history[-self.history_window:]
+        for b in tail:
+            h = ((h << 8) | b) & 0xFFFFFFFF
+        # Mix high bits via multiplication for better distribution at small maps
+        h = (h * 2654435761) & 0xFFFFFFFF
+        # Ensure we never start in the last 256 slots (map[map_index + 255] must fit)
+        return h % (self.map_size - 256)
+
+    def start_byte(self) -> None:
+        self._map_index = self._byte_context_hash()
+
+    def predict_bit(self, bit_context: int, k: int) -> float:
+        addr = (self._map_index + bit_context) % self.map_size
+        state = self._map[addr]
+        return float(self._predictions[state])
+
+    def update_bit(self, bit: int, bit_context: int, k: int) -> None:
+        addr = (self._map_index + bit_context) % self.map_size
+        state = self._map[addr]
+        pred = self._predictions[state]
+        # EMA prediction update toward observed bit
+        self._predictions[state] = pred + (bit - pred) * self.lr
+        # State advance
+        self._map[addr] = int(self._next_state[state, bit])
+
+    def commit_byte(self, byte: int) -> None:
+        self._history.append(byte)
+        # Cap history to what's needed (small + 1 slot for safety)
+        if len(self._history) > self.history_window + 8:
+            self._history = self._history[-self.history_window:]
+
+
+def make_indirect_factory(
+    map_size: int = 1 << 22,
+    lr: float = 0.1,
+    history_window: int = 2,
+):
+    """Factory: returns a function producing a fresh IndirectBitPredictor."""
+    def factory() -> IndirectBitPredictor:
+        return IndirectBitPredictor(
+            context_fn=None,  # context computed internally via _history
+            map_size=map_size,
+            lr=lr,
+            history_window=history_window,
+        )
+    return factory
+
+
 __all__ = [
     "BitPredictor",
     "BytewiseBitPredictor",
+    "IndirectBitPredictor",
     "make_bytewise_bit_factory",
+    "make_indirect_factory",
     "_bit_interval",
 ]
