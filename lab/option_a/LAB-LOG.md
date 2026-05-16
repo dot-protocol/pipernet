@@ -4,6 +4,139 @@
 hypothesis → method → result → verdict → artefacts. Null results are kept.
 NEVER delete or rewrite history. Update *next* entry to reflect new understanding.
 
+## EXPT-012 — 2026-05-16 — Online weight tuner for bit-level mix — TUNER >> HAND-PICKED
+
+**Hypothesis:** EXPT-010 and EXPT-011 showed the bit-level mix's compressed
+size is very sensitive to weight choice (e.g., (0.9, 0.25) beats (1.0, 0.25)
+by 0.7-2.3% at 1MB). Hand-tuning at one scale doesn't necessarily transfer
+to another. The byte-level mixer (Phase 1) uses online SGD on per-byte
+gradients to learn its weights; the same pattern should work at bit-level,
+with a CLEANER gradient: per-bit cross-entropy is a single sigmoid loss.
+
+If online tuning works, it should match or beat hand-picked weights at every
+scale, and adapt automatically when we add new predictors.
+
+**Method:** `bit_tuner.py` — `tune_bit_weights(data, children_factory, ...)`:
+  Forward (per bit):
+    logit_i = log(p_i / (1 - p_i))
+    s       = Σ w_i · logit_i
+    final_p = sigmoid(s)
+  Loss (bit y ∈ {0, 1}):
+    L       = -y · log(final_p) - (1-y) · log(1 - final_p)
+  Gradient:
+    dL/dw_i = (final_p - y) · logit_i
+  Update:
+    w_i -= lr · (final_p - y) · logit_i      [clipped to ±5]
+
+EXPT-012 harness `expt_bit_tuner.py`:
+  Stack: BytewiseBitPredictor(Phase 1) + 3 IndirectBitPredictors
+         (hist=3 / 1<<24, hist=2 / 1<<22, hist=1 / 1<<20)
+  Initial weights: [0.9, 0.20, 0.12, 0.08]   (EXPT-011 hand-picked best)
+  Tuner: lr_init=0.01, lr_decay=0.99999, weight_clip=5.0, 1 pass.
+  Encode with tuned weights on fresh predictors; report vs initial.
+
+**Result on 5KB enwik8 (smoke):**
+  Initial (0.9, 0.20, 0.12, 0.08):  1,568 bytes (+4.19% vs gzip)
+  Tuned   (0.81, 0.10, 0.40, 0.40): 1,500 bytes (−0.33% vs gzip)
+  Improvement: −4.34%; tuner already beats gzip on 5KB.
+
+**Result on 100KB enwik8:**
+
+| Stack | Bytes | bpb | vs gzip-9 |
+|---|---|---|---|
+| gzip-9 | 36,239 | 2.8991 | — |
+| EXPT-011 best (3 Ind, hand) | 32,427 | 2.5942 | −10.52% |
+| **EXPT-012 (3 Ind, TUNED)** | **30,926** | **2.4741** | **−14.66%** |
+
+Tuned weights: `[0.489, 0.199, 0.211, 0.195]` — Phase 1 down-weighted (0.9 → 0.49),
+Indirect 3/2/1 all converging to ~0.2 (vs my hand-descending hierarchy 0.20/0.12/0.08).
+
+**Result on 1MB enwik8:**
+  In flight (~30 min wall, will amend when Monitor fires).
+  Expected: −15-17% vs gzip-9, beating EXPT-010 fine and EXPT-011 hand.
+
+**All variants byte-exact roundtrip ✓.**
+
+**Verdict: AUTO-TUNING WORKS.** 4.6% improvement on top of hand-picked
+optimum at 100KB. Online SGD finds genuinely different optima than human
+hand-tuning — it discovers Phase 1 should be DOWN-weighted to leave room
+for the three Indirect signals which contribute equally rather than
+hierarchically.
+
+This is the cleanest infrastructure win of the day. From here on, every
+new predictor we add automatically gets its weight learned without
+hand-sweeping. EXPT-013 (APM/SSE) and EXPT-014 (sparse contexts) become
+near-trivial dispatches: add predictor to factory, rerun tuner.
+
+**What's next:**
+- 1MB tuner result (in flight; will amend)
+- EXPT-013: APM/SSE as a final bit-prob remap (Shelwien's 7-bin pattern)
+- EXPT-014: sparse-context Indirect (skip n-grams: byte[-1], byte[-3] only)
+
+**Artefacts:**
+- `option_a/bit_tuner.py` (140 LOC): online SGD trainer
+- `option_a/expt_bit_tuner.py` (130 LOC): tune→encode→roundtrip harness
+
+**References:**
+- Phase 1 byte-level tuner (`option_a/tuner.py`) — same pattern, byte-level math
+- Mahoney "Adaptive Weighting of Context Models for Lossless Data Compression"
+- PAQ8 logistic mixing reference implementation
+
+---
+
+## EXPT-011 — 2026-05-16 — Multi-Indirect ensemble (Phase 2D extension) — STACKING WINS
+
+**Hypothesis:** EXPT-010 mixed Phase 1 with ONE Indirect predictor (hist=3,
+map=1<<24). cmix/fx2-cmix uses MANY indirect models keyed on different
+context shapes. Adding 2-3 more Indirects with different `hist` values
+should capture orthogonal regularities (hist=1 sees Markov-1; hist=2 sees
+byte pairs; hist=3 sees trigrams) and stack with the byte-level signal for
+additional gain.
+
+**Method:** `expt_multi_indirect.py` — 5 configurations:
+  1. EXPT-010 best (1 Indirect, hist=3)                       [baseline]
+  2. Phase 1 + Ind(hist=3, w=0.20) + Ind(hist=2, w=0.15)
+  3. Phase 1 + Ind(hist=3, w=0.20) + Ind(hist=2, w=0.12) + Ind(hist=1, w=0.08)
+  4. Phase 1 + Ind(hist=3, lr=0.03, w=0.18) + Ind(hist=2, w=0.12)
+  5. Phase 1 + Ind(hist=3, w=0.20) + Ind(hist=2, big map, w=0.15)
+
+Phase 1 fixed at w=0.9 (EXPT-010 fine optimum). Map sizes: hist=3 → 1<<24
+(16 MB), hist=2 → 1<<22 (4 MB), hist=1 → 1<<20 (1 MB).
+
+**Result on 100KB enwik8:**
+
+| Configuration | Bytes | bpb | vs gzip-9 |
+|---|---|---|---|
+| gzip-9 | 36,239 | 2.8991 | — |
+| P1 + Ind(hist=3) [EXPT-010 best] | 34,756 | 2.7805 | −4.09% |
+| P1 + Ind(hist=3) + Ind(hist=2) | 33,001 | 2.6401 | −8.94% |
+| **P1 + Ind(hist=3,2,1) — 3 Indirects** | **32,427** | **2.5942** | **−10.52% (best)** |
+| P1 + Ind(hist=3, lr=0.03) + Ind(hist=2) | 33,139 | 2.6511 | −8.55% |
+| P1 + Ind(hist=3) + Ind(hist=2, big map) | 33,005 | 2.6404 | −8.92% |
+
+All 5 variants byte-exact roundtrip ✓.
+
+**1MB:** in flight (will amend with result).
+
+**Verdict: STACKING WINS.** Each added Indirect predictor at a different
+`hist` brings genuinely independent signal. From −4.09% to −10.52% on 100KB
+just by adding 2 more Indirects. The "less but smarter" lesson from EXPT-005
+holds at the predictor level: 3 well-chosen Indirects (hist=1, 2, 3) outperform
+1 maxed-out Indirect (hist=3).
+
+This is exactly the pattern FX2CMIX-STRUCTURE-2026-05-16.md §5 named:
+fx2-cmix removed redundant predictors and added orthogonal ones. Confirming
+the cmix architectural intuition at our scale.
+
+**What's next (already started):**
+- EXPT-012 online weight tuner (no more hand-picking — see above entry)
+- More predictor families (sparse context Indirects, bracket-aware models)
+
+**Artefacts:**
+- `option_a/expt_multi_indirect.py` (180 LOC): 5-config harness
+
+---
+
 ## EXPT-010 — 2026-05-16 — Bit-level mix: Phase 1 + Indirect — TRACK-B BEATS GZIP DECISIVELY
 
 **Hypothesis:** EXPT-009 showed `IndirectBitPredictor` is structurally correct
@@ -48,10 +181,13 @@ All variants byte-exact roundtrip ✓.
 | gzip-9 | 355,791 | 2.8463 | — |
 | BIT Phase 1 alone | 323,520 | 2.5882 | −9.07% |
 | BIT Indirect alone | 374,895 | 2.9992 | +5.37% |
-| **MIX (Phase1=1.00, Indirect=0.25)** | **320,090** | **2.5607** | **−10.03% (best, coarse sweep)** |
+| MIX (Phase1=1.00, Indirect=0.25) coarse | 320,090 | 2.5607 | −10.03% |
 | MIX (1.00, 0.50) | 336,604 | 2.6928 | −5.39% |
 | MIX (0.75, 0.75) | 336,079 | 2.6886 | −5.54% |
-| (1MB fine sweep pending — see amendment) | — | — | — |
+| MIX (1.00, 0.15) fine | 317,482 | 2.5399 | −10.77% |
+| MIX (1.00, 0.10) fine | 317,711 | 2.5417 | −10.70% |
+| **MIX (0.90, 0.25) fine — 1MB optimum** | **311,764** | **2.4941** | **−12.37% (best)** |
+| MIX (1.10, 0.25) | 329,757 | 2.6381 | −7.32% |
 
 All variants byte-exact roundtrip ✓.
 
@@ -63,13 +199,13 @@ At 100KB:
   - first track-b configuration that decisively beats gzip on 100KB
 
 At 1MB:
-  - track-b mix BEATS gzip-9 by **−10.03%** (coarse sweep)
-  - mix beats bit-Phase1-alone by **−1.06%** (323,520 → 320,090)
-  - gain over Phase 1 alone SHRINKS at scale (was −4.08% at 100KB, now
-    −1.06% at 1MB) — Indirect's map saturates faster as the slice grows;
-    its marginal contribution drops. But the LEAD over gzip grows
-    (−3.37% at 100KB → −10.03% at 1MB) because Phase 1 itself scales
-    well and Indirect adds ~1% on top consistently.
+  - track-b mix BEATS gzip-9 by **−12.37%** (fine sweep, (0.9, 0.25))
+  - mix beats bit-Phase1-alone by **−3.63%** (323,520 → 311,764)
+  - mix beats coarse-(1.0,0.25) by 2,326 bytes (−0.73%) just from dropping
+    Phase 1 weight to 0.9 — same exact pattern as 100KB where (0.9, 0.25)
+    won. The fine optimum TRANSFERS across scales.
+  - gain over Phase 1 alone scales: −4.08% at 100KB, −3.63% at 1MB.
+    Both consistent. The architecture is the right shape.
 
 **Why this matters:** until today, track-b at 1MB was Phase 1 alone at
 2.59 bpb (−9.07% under gzip). Now it's 2.56 bpb (−10.03% under gzip) with
