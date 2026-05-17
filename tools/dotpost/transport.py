@@ -105,6 +105,48 @@ def mcp_call(method: str, params: dict) -> dict:
     raise RuntimeError(f"unexpected MCP response: {body[:300]}")
 
 
+def dotpost_inbox(handle: str, *, include_broadcasts: bool = True,
+                  include_mentions: bool = True, limit: int = 50,
+                  since: str | None = None) -> dict:
+    """Fetch dotposts addressed to <handle> via the tag-indexed endpoint.
+
+    Replaces the text-CONTAINS oracle_query path that powered fetch_inbox()
+    historically (state.md blocker #10). The /dotpost-inbox endpoint on
+    tree_serve does a proper Cypher `WHERE 'dotpost' IN o.tags` query and
+    returns structured rows with from/to/body/kind already split out.
+
+    Returns the raw JSON: { ok, agent, count, messages: [...] }.
+    Raises RuntimeError on HTTP errors or bad responses.
+    """
+    qs = [f"agent={handle}", f"limit={int(limit)}"]
+    if include_broadcasts: qs.append("include_broadcasts=true")
+    else:                  qs.append("include_broadcasts=false")
+    if include_mentions:   qs.append("include_mentions=true")
+    else:                  qs.append("include_mentions=false")
+    if since:              qs.append(f"since={since}")
+    url = f"{ORACLE_BASE.rstrip('/')}/dotpost-inbox?{'&'.join(qs)}"
+    req = Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {load_token()}",
+            "Accept":        "application/json",
+            "User-Agent":    "pipernet-dotpost/0.5 (+https://piedpiper.fun)",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(req, timeout=20) as resp:
+            body = resp.read().decode("utf-8")
+    except HTTPError as e:
+        raise RuntimeError(f"dotpost-inbox HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+    except URLError as e:
+        raise RuntimeError(f"dotpost-inbox network error: {e.reason}")
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"dotpost-inbox: not JSON: {body[:300]}")
+
+
 def tool_call(tool_name: str, args: dict) -> dict:
     """Call a named Oracle MCP tool with the given arguments dict.
 
