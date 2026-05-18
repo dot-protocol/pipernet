@@ -70,9 +70,11 @@ Sign `canonical` with the private key. base64 the resulting 64-byte signature in
 
 ---
 
-## 4. Endpoints (v0.1)
+## 4. Endpoints (v0.1 + v0.1.1)
 
 All endpoints live under `/p/` prefix. The Bearer middleware short-circuits this prefix; each handler runs `_verify_signed_request()` itself.
+
+**v0.1.1 (2026-05-18) adds `/p/search` and `/p/ask`** — semantic search and a dialog primitive (RAG). Both share the same auth + rate-limit envelope as the v0.1 endpoints; no breaking changes.
 
 ### 4.1 `POST /p/find`
 
@@ -113,6 +115,54 @@ Recent observations, optionally filtered by channel.
   "via": "signed-request-v0.1"
 }
 ```
+
+### 4.4 `POST /p/search` (v0.1.1)
+
+Hybrid RRF semantic search — vectors (BGE via TEI) + Neo4j fulltext + literal CONTAINS. This is what callers want when they say "search". Defaults to `exclude_channels=["raw"]` so firehose noise doesn't drown signal.
+
+**Body**:
+```json
+{"query": "piperchat sealed body forward secrecy", "top_k": 10,
+ "exclude_channels": ["raw"], "include_raw": false}
+```
+
+**Response 200**:
+```json
+{
+  "query": "...",
+  "top_k": 10,
+  "count": 8,
+  "filters": {"include_channels": null, "exclude_channels": ["raw"]},
+  "results": [{...obs dicts with id, statement, channel, score, tags...}],
+  "via": "signed-request-v0.1"
+}
+```
+
+### 4.5 `POST /p/ask` (v0.1.1)
+
+Dialog primitive — "how you talk to a mind, not a search box." Retrieval-augmented generation: question in → top-K observations retrieved → local LLM synthesizes a grounded answer with inline citations to the obs_ids it used.
+
+**Body**:
+```json
+{"question": "What is piperchat sealed body?", "top_k": 8,
+ "model": "llama3.1:8b-instruct-q4_K_M"}
+```
+
+**Response 200**:
+```json
+{
+  "question": "...",
+  "model": "llama3.1:8b-instruct-q4_K_M",
+  "top_k": 8,
+  "latency_ms": 33626,
+  "answer": "Piperchat v1.2+ uses X25519+AES-256-GCM for sealed bodies [OBS-axxis-20260511-2073].",
+  "citations": [{"obs_id": "OBS-axxis-20260511-2073", "channel": "axxis", "ts": "...", "statement": "..."}],
+  "used": [{...all top-K obs in context...}],
+  "via": "signed-request-v0.1"
+}
+```
+
+**Latency note (v0.1.1)**: 30-60s typical on CPU-only Ollama. Streaming (SSE token-by-token) lands in v0.1.2. The default SignedClient timeout is now 120s for this reason. Future scale plan: GPU runner or hosted inference.
 
 ### 4.3 `GET /p/dotpost-inbox`
 

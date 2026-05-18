@@ -73,7 +73,7 @@ class SignedClient:
         generated: True if a new key was generated on first init.
     """
 
-    def __init__(self, handle: str, privkey_path: str, base_url: str, timeout: int = 30):
+    def __init__(self, handle: str, privkey_path: str, base_url: str, timeout: int = 120):
         self.handle = handle
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
