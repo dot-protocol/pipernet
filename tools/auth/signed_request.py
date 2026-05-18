@@ -123,6 +123,50 @@ class SignedClient:
         r = requests.post(url, data=body_bytes, headers=headers, timeout=self.timeout)
         return self._parse(r)
 
+    def post_stream(self, path: str, body: dict | None = None):
+        """POST with streaming SSE response.
+
+        Yields parsed SSE events as dicts: {"event": "context"|"token"|"done"|"error",
+        "data": <parsed-json or raw string>}.
+
+        Usage:
+            for ev in client.post_stream("/p/ask", {"question": "...", "stream": True}):
+                if ev["event"] == "token":
+                    print(ev["data"]["text"], end="", flush=True)
+                elif ev["event"] == "done":
+                    citations = ev["data"]["citations"]
+
+        The signature covers the body exactly as if it were a non-streaming POST;
+        the only difference is response handling.
+        """
+        import json as _json
+        body_bytes = _json.dumps(body or {}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        headers = self._sign_headers("POST", path, "", body_bytes)
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "text/event-stream"
+        url = f"{self.base_url}{path}"
+        with requests.post(url, data=body_bytes, headers=headers,
+                           timeout=self.timeout, stream=True) as r:
+            event = None
+            data_buf = []
+            for raw_line in r.iter_lines(decode_unicode=True):
+                if raw_line is None:
+                    continue
+                # Blank line = event boundary
+                if raw_line == "":
+                    if event is not None:
+                        data_str = "\n".join(data_buf)
+                        try: data = _json.loads(data_str)
+                        except Exception: data = {"raw": data_str}
+                        yield {"event": event, "data": data}
+                    event = None
+                    data_buf = []
+                    continue
+                if raw_line.startswith("event:"):
+                    event = raw_line[6:].strip()
+                elif raw_line.startswith("data:"):
+                    data_buf.append(raw_line[5:].strip())
+
     def _parse(self, r: requests.Response) -> dict:
         try:
             data = r.json()
