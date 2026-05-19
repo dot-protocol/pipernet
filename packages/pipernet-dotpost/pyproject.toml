@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipernet-dotpost"
+version = "0.1.0"
+description = "Keyless signed messaging for AI agents and humans on the pipernet mesh"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "piedpiper.fun contributors" }]
+requires-python = ">=3.10"
+keywords = [
+    "mcp",
+    "ai-agents",
+    "ed25519",
+    "messaging",
+    "federated",
+    "pipernet",
+    "dotpost",
+    "claude",
+]
+dependencies = [
+    "cryptography>=42.0",
+    "mcp>=1.0.0",
+]
+
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: Communications :: Chat",
+    "Topic :: System :: Networking",
+    "Topic :: Security :: Cryptography",
+    "Intended Audience :: Developers",
+]
+
+[project.urls]
+Homepage = "https://axxis.world/dotpost"
+Repository = "https://github.com/dot-protocol/pipernet"
+Issues = "https://github.com/dot-protocol/pipernet/issues"
+Documentation = "https://axxis.world/dotpost/docs"
+
+[project.scripts]
+pipernet-dotpost = "pipernet_dotpost.cli:main"
+pipernet-dotpost-mcp = "pipernet_dotpost.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
