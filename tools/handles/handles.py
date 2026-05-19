@@ -117,6 +117,16 @@ class Contact:
     added_at: str
 
 
+@dataclass
+class HandleRotation:
+    """Result of a successful handle rotation."""
+    handle: str
+    old_pubkey: str
+    new_pubkey: str
+    rotate_id: str
+    rotated_at: str
+
+
 def claim_handle(handle: str, note: str = None) -> HandleClaim:
     """Claim a handle, binding it to the current session's keypair.
 
@@ -204,6 +214,137 @@ def claim_handle(handle: str, note: str = None) -> HandleClaim:
         pubkey=pubkey_str,
         claim_id=obs_id,
         claimed_at=now_iso,
+    )
+
+
+def rotate_handle(
+    handle: str,
+    new_privkey_hex: str,
+    old_privkey_hex: str = None,
+    reason: str = None,
+) -> HandleRotation:
+    """Rotate the keypair backing an existing handle.
+
+    Posts a signed handle_rotate observation. Both the OLD key (proving rotation
+    authority) and the NEW key (proving new key control) sign the same canonical
+    rotation bytes. After this lands, resolvers per §5.3 advance the canonical
+    pubkey for <handle> from old → new.
+
+    Args:
+        handle: Existing claimed handle to rotate. Must already have a valid claim.
+        new_privkey_hex: 64-char hex seed of the NEW Ed25519 keypair (the one taking over).
+        old_privkey_hex: 64-char hex seed of the OLD keypair. If None, falls back to
+            $PIPERNET_OLD_PRIVKEY env, then to load_or_generate(handle) which respects
+            $PIPERNET_PRIVKEY and the pipernet keyring file for <handle>.
+        reason: Optional public note (up to 200 chars).
+
+    Returns:
+        HandleRotation with handle, old_pubkey, new_pubkey, rotate_id, rotated_at.
+
+    Raises:
+        ValueError: If handle is invalid/reserved, keys are malformed, or rotation is a no-op.
+        RuntimeError: If Oracle ingest fails.
+    """
+    from dotpost.identity import _parse_privkey_str  # private helper, reused for hex/PEM parse
+
+    handle = _validate_handle(handle)
+
+    # Load OLD keypair: explicit arg → PIPERNET_OLD_PRIVKEY env → load_or_generate
+    if old_privkey_hex is None:
+        old_privkey_hex = os.getenv("PIPERNET_OLD_PRIVKEY")
+    if old_privkey_hex:
+        old_priv = _parse_privkey_str(old_privkey_hex)
+        old_pub_bytes = old_priv.public_key().public_bytes_raw()
+    else:
+        old_priv, old_pub_bytes, _ = load_or_generate(handle)
+    old_pub_hex = pubkey_hex(old_pub_bytes)
+    old_pubkey_str = f"ed25519:{old_pub_hex}"
+
+    # Load NEW keypair
+    new_priv = _parse_privkey_str(new_privkey_hex)
+    new_pub_bytes = new_priv.public_key().public_bytes_raw()
+    new_pub_hex = pubkey_hex(new_pub_bytes)
+    new_pubkey_str = f"ed25519:{new_pub_hex}"
+
+    if old_pub_hex == new_pub_hex:
+        raise ValueError("rotation is a no-op: old and new pubkeys are identical")
+
+    # Build canonical rotation object
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rotate_obj = {
+        "v": 1,
+        "kind": "handle_rotate",
+        "handle": handle,
+        "old_pubkey": old_pubkey_str,
+        "new_pubkey": new_pubkey_str,
+        "rotated_at": now_iso,
+        "reason": reason or "",
+    }
+    canonical = canonicalize(rotate_obj)
+
+    # Double signing: OLD authorizes, NEW proves control
+    sig_old = sign(old_priv, canonical)
+    sig_new = sign(new_priv, canonical)
+
+    rotate_z = _base64url_encode(zlib.compress(canonical, level=3))
+    rotate_sig_old_b64 = _base64url_encode(sig_old)
+    rotate_sig_new_b64 = _base64url_encode(sig_new)
+
+    tags = [
+        "icontact",
+        "handle",
+        f"handle_rotate:{handle}",
+        f"handle_pubkey:{new_pub_hex}",
+        f"old_pubkey:{old_pub_hex}",
+        f"rotate_z:{rotate_z}",
+        f"rotate_sig_old:{rotate_sig_old_b64}",
+        f"rotate_sig_new:{rotate_sig_new_b64}",
+        f"from:{handle}",
+    ]
+
+    # Statement is structured distinctly from handle_claim so vector dedup doesn't false-positive.
+    statement = (
+        f"HANDLE ROTATION EVENT (v1) — keypair replacement for handle '{handle}'\n"
+        f"  authority sig:  ed25519 by old pubkey {old_pub_hex}\n"
+        f"  control sig:    ed25519 by new pubkey {new_pub_hex}\n"
+        f"  rotated_at:     {now_iso}\n"
+        f"  reason:         {reason or '(no reason given)'}\n"
+        f"After this event, the canonical pubkey for '{handle}' advances from "
+        f"{old_pub_hex[:16]}… to {new_pub_hex[:16]}…. Resolvers per spec §5.3 "
+        f"validate both signatures and advance the chain forward."
+    )
+
+    try:
+        result = tool_call("oracle_ingest", {
+            "source": "pipernet-handle-rotate",
+            "extracted": {
+                "items": [{
+                    "content": statement,
+                    "type": "handle_rotate",
+                    "channel": "raw",
+                    "tags": tags,
+                }]
+            },
+        })
+        obs_id = result.get("obs_id") or result.get("id")
+        if not obs_id:
+            text = result.get("text", "")
+            for line in text.splitlines():
+                if line.startswith("IDs:"):
+                    obs_id = line.split("IDs:", 1)[1].strip().split(",")[0].strip()
+                    break
+        if not obs_id:
+            raise RuntimeError(f"oracle ingest failed: no obs_id in response {result}")
+    except Exception as e:
+        logger.error(f"oracle_ingest failed: {e}")
+        raise RuntimeError(f"Failed to ingest handle rotation: {e}")
+
+    return HandleRotation(
+        handle=handle,
+        old_pubkey=old_pubkey_str,
+        new_pubkey=new_pubkey_str,
+        rotate_id=obs_id,
+        rotated_at=now_iso,
     )
 
 

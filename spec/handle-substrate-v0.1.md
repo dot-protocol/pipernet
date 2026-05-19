@@ -41,9 +41,9 @@ It is **not** a name service. There is no DNS, no transfer market, no token-gati
 
 ## 2. Locked design decisions
 
-1. **First-valid-write wins.** The canonical claim for `<name>` is the **oldest** `handle_claim:<name>` observation with a valid signature. Subsequent claims are ignored by resolvers. There is no transfer in v0.1.
-2. **One handle per claim observation; many handles per pubkey.** A pubkey can hold multiple handles (`shannon`, `shannon-test`, `piper`). A handle binds to exactly one pubkey.
-3. **Claims are not revocable in v0.1.** A compromised pubkey loses its handles. Revocation lands in v0.2 with a signed `handle_void:<name>` observation. v0.1 holders should treat their claiming key as long-lived.
+1. **First-valid-write wins for the initial claim.** The canonical *initial* claim for `<name>` is the **oldest** `handle_claim:<name>` observation with a valid signature. Subsequent `handle_claim:<name>` observations are ignored by resolvers. Ownership *forward in time* can move via signed `handle_rotate:<name>` events (see §4.5 + §5.3) — but the original claim is immutable.
+2. **One handle per claim observation; many handles per pubkey.** A pubkey can hold multiple handles (`shannon`, `shannon-test`, `piper`). A handle binds to exactly one pubkey at a time; rotations update which pubkey.
+3. **Claims are not revocable in v0.1.** A compromised pubkey loses its handles UNLESS the owner rotates first. Revocation lands in v0.2 with a signed `handle_void:<name>` observation. v0.1 holders should treat their claiming key as long-lived and rotate proactively if a key may be exposed.
 4. **Sign-then-compress, locked.** Identical to intent v0.2 §14: signature over canonical JSON bytes, zstd over the canonical JSON for wire, signature in a separate tag. Verifiers reconstruct canonical bytes and check the sig.
 5. **Handles are lowercase, ASCII, with a fixed regex.** `^[a-z0-9][a-z0-9-]{2,31}$`. Minimum 3 chars (no 1-2 char squatting in v0.1). Maximum 32 chars. Strict normalization: any submitted handle is lowercased and validated before claim or lookup.
 6. **Reserved handles cannot be claimed.** v0.1 reserves: `all`, `system`, `oracle`, `admin`, `null`, `none`, `void`, `self`, `me`, `piper`, `pipernet`, `icontact`, `dotpost`, plus `kin-*`, `dot-*` prefixes. Claims for reserved names are invalid and resolvers MUST return `null`.
@@ -60,9 +60,14 @@ Handle-substrate observations carry these tags. Existing DOTpost tags compose no
 | Tag | Meaning | On |
 |---|---|---|
 | `handle_claim:<name>` | This observation claims the handle `<name>`. | Claim |
-| `handle_pubkey:<base64-32-bytes>` | The pubkey doing the claiming. Indexed for reverse lookup. | Claim |
+| `handle_pubkey:<base64-32-bytes>` | The pubkey doing the claiming (or the NEW pubkey for a rotation). Indexed for reverse lookup. | Claim, Rotate |
 | `claim_z:<b64>` | base64url(zstd(canonical_json_of_claim)). | Claim |
 | `claim_sig:<b64>` | base64url(ed25519_sig_over_canonical_claim). | Claim |
+| `handle_rotate:<name>` | This observation rotates the keypair behind handle `<name>` from `old_pubkey` to a new `pubkey`. | Rotate |
+| `old_pubkey:<base64-32-bytes>` | The pubkey being rotated FROM (must match the current canonical pubkey at rotation time). | Rotate |
+| `rotate_z:<b64>` | base64url(zstd(canonical_json_of_rotation)). | Rotate |
+| `rotate_sig_old:<b64>` | base64url(ed25519_sig_by_OLD_key_over_canonical_rotation). Proves rotation authority. | Rotate |
+| `rotate_sig_new:<b64>` | base64url(ed25519_sig_by_NEW_key_over_canonical_rotation). Proves new key control. | Rotate |
 | `contact_for:<self>` | This observation is part of `<self>`'s contact list. | Contact |
 | `contact:<other>` | The contact being recorded. | Contact |
 | `contact_z:<b64>` | base64url(zstd(canonical_json_of_contact)). Optional metadata. | Contact |
@@ -71,8 +76,9 @@ Handle-substrate observations carry these tags. Existing DOTpost tags compose no
 
 Lookups:
 
-- Resolve handle to pubkey: `oracle_audit(tag_filter="handle_claim:<name>", limit=N)` → take oldest valid.
+- Resolve handle to pubkey: see §5 — uses BOTH `handle_claim:<name>` (initial) and `handle_rotate:<name>` (chain).
 - Reverse lookup (pubkey to handles): `oracle_audit(tag_filter="handle_pubkey:<b64>", limit=100)`.
+- Find rotations of a handle: `oracle_audit(tag_filter="handle_rotate:<name>", limit=50)`.
 - Read my contact list: `oracle_audit(tag_filter="contact_for:<self>", limit=N)`.
 - Find observations on a topic: `oracle_audit(tag_filter="topic:<name>", limit=N)`.
 - Find DMs that mention me: `oracle_audit(tag_filter="mention:<self>", limit=N)`.
@@ -144,6 +150,84 @@ The `from:<handle>` tag is the claim event announcing itself as authored by the 
 
 ---
 
+## 4.5 Rotation event schema
+
+A rotation moves the canonical pubkey for an existing handle from `old_pubkey` to a new pubkey. Both the old key and the new key must sign the same canonical bytes — proving (a) the rotation was authorized by the current owner and (b) the new key is genuinely controlled by the same owner.
+
+### 4.5.1 Canonical JSON
+
+```json
+{
+  "v": 1,
+  "kind": "handle_rotate",
+  "handle": "loom",
+  "old_pubkey": "ed25519:19ebb67939ec1dcb96c2ea7ff930873703660aeb88e32d3f8cdbed025c5d6fd7",
+  "new_pubkey": "ed25519:<hex>",
+  "rotated_at": "2026-05-21T10:00:00Z",
+  "reason": "rotated from custodial bootstrap to device-local keypair"
+}
+```
+
+### 4.5.2 Required fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `v` | integer | Schema version. MUST be 1. |
+| `kind` | string | MUST be `"handle_rotate"`. |
+| `handle` | string | Existing claimed handle. Lowercased + regex-validated. |
+| `old_pubkey` | string | `"ed25519:" + hex(32 bytes)`. MUST equal the resolver's current canonical pubkey for the handle at rotation time. |
+| `new_pubkey` | string | `"ed25519:" + hex(32 bytes)`. The pubkey taking over forward. |
+| `rotated_at` | string | RFC 3339 / ISO 8601 with Z suffix. |
+
+### 4.5.3 Optional fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `reason` | string | Up to 200 chars. Public note explaining the rotation. |
+
+### 4.5.4 Double signing
+
+A rotation carries **two** signatures over the same canonical bytes:
+
+```
+canonical    = canonicalize(rotation_obj)   # stable JSON, sorted keys, separators=(",",":")
+sig_old      = ed25519_sign(old_privkey, canonical)
+sig_new      = ed25519_sign(new_privkey, canonical)
+rotate_z     = base64url(zstd(canonical, level=3))
+rotate_sig_old = base64url(sig_old)
+rotate_sig_new = base64url(sig_new)
+```
+
+Both signatures are non-negotiable. A rotation with only one valid signature is structurally invalid and resolvers MUST ignore it (not just reject — silently skip past it in the chain).
+
+### 4.5.5 Observation shape
+
+```python
+oracle_ingest(
+  source="pipernet-handle-rotate",
+  extracted={"items": [{
+    "content": f"[handle_rotate] {handle}: {old_pubkey[:16]} → {new_pubkey[:16]}",
+    "type": "handle_rotate",
+    "channel": "raw",
+    "tags": [
+      "icontact",
+      "handle",
+      f"handle_rotate:{handle}",
+      f"handle_pubkey:{new_pubkey_b64}",
+      f"old_pubkey:{old_pubkey_b64}",
+      f"rotate_z:{rotate_z}",
+      f"rotate_sig_old:{rotate_sig_old}",
+      f"rotate_sig_new:{rotate_sig_new}",
+      f"from:{handle}",
+    ],
+  }]},
+)
+```
+
+The `handle_pubkey:` tag carries the NEW pubkey (so reverse-lookup `pubkey → handles` returns the current pubkey, not a stale one). The OLD pubkey is preserved in its own `old_pubkey:` tag for chain reconstruction.
+
+---
+
 ## 5. Resolver contract
 
 A compliant resolver takes a handle and returns either:
@@ -191,13 +275,72 @@ def resolve(handle: str) -> Optional[Resolution]:
     return None, "no-valid-claim"
 ```
 
-The resolver MUST iterate in **oldest-first** order and accept the **first signature-valid** claim. Newer claims of the same handle are silently ignored — they're not invalid as observations, they just lose the race.
+The resolver MUST iterate in **oldest-first** order and accept the **first signature-valid** claim. Newer claims of the same handle are silently ignored — they're not invalid as observations, they just lose the race. The resolved pubkey from §5.1 is the **initial** pubkey; §5.3 applies any rotations on top.
 
 ### 5.2 Caching
 
-Resolvers SHOULD cache `(handle → pubkey)` locally with a short TTL (60-300 seconds for v0.1). Claims are append-only and the canonical answer cannot change, so caching is safe; the TTL only exists to pick up handles that were unclaimed at last check.
+Resolvers SHOULD cache `(handle → pubkey)` locally with a short TTL (60-300 seconds for v0.1). The canonical answer can advance forward (via rotations) but never moves backward, so caching is safe; the TTL exists to pick up new rotations.
 
-A cache MAY be persisted to disk under the pipernet config directory (e.g. `$PIPERNET_HOME/handles-cache.json`) keyed by `{handle, pubkey, claim_id, claimed_at}` for fast warm starts.
+A cache MAY be persisted to disk under the pipernet config directory (e.g. `$PIPERNET_HOME/handles-cache.json`) keyed by `{handle, pubkey, claim_id, claimed_at, last_rotation_id}` for fast warm starts.
+
+### 5.3 Resolution with rotations
+
+The full resolver applies §5.1 first to get the initial pubkey, then walks the rotation chain forward:
+
+```python
+def resolve_with_rotations(handle: str) -> Optional[Resolution]:
+    initial, err = resolve(handle)   # §5.1
+    if not initial:
+        return None, err
+
+    current_pubkey_str = initial.pubkey
+    current_claim_id   = initial.claim_id
+    current_at         = initial.claimed_at
+
+    rot_rows = oracle_audit(tag_filter=f"handle_rotate:{handle}", limit=200)
+    rot_rows.sort(key=lambda r: r.created_at)   # oldest first
+
+    for row in rot_rows:
+        try:
+            z       = extract_tag("rotate_z:",       row.tags)
+            sig_old = extract_tag("rotate_sig_old:", row.tags)
+            sig_new = extract_tag("rotate_sig_new:", row.tags)
+            canonical = zstd_decompress(base64url_decode(z))
+            rot       = json.loads(canonical)
+
+            if rot["handle"] != handle:                          continue
+            if rot["v"] != 1:                                    continue
+            if rot["kind"] != "handle_rotate":                   continue
+            if rot["old_pubkey"] != current_pubkey_str:          continue   # chain break — ignore
+
+            old_pub_bytes = base64_decode(rot["old_pubkey"].removeprefix("ed25519:"))
+            new_pub_bytes = base64_decode(rot["new_pubkey"].removeprefix("ed25519:"))
+
+            if not ed25519_verify(old_pub_bytes, base64url_decode(sig_old), canonical):
+                continue   # old key didn't authorize — ignore
+            if not ed25519_verify(new_pub_bytes, base64url_decode(sig_new), canonical):
+                continue   # new key didn't prove control — ignore
+
+            # rotation is valid; advance the chain
+            current_pubkey_str = rot["new_pubkey"]
+            current_claim_id   = row.id
+            current_at         = rot["rotated_at"]
+        except (KeyError, ValueError, json.JSONDecodeError):
+            continue
+
+    return Resolution(
+        pubkey=current_pubkey_str,
+        claim_id=current_claim_id,
+        claimed_at=current_at,
+    ), None
+```
+
+Key properties:
+
+1. **Forward-only.** Each valid rotation advances the canonical pubkey; an invalid one is silently skipped (chain break does not invalidate later entries unless they reference the broken state's pubkey as `old_pubkey`).
+2. **Both signatures required.** A rotation with only `sig_old` is unauthenticated (anyone could publish a rotation declaring some new key); a rotation with only `sig_new` is unauthorized (the new key claiming itself without the old key's consent).
+3. **Chain head wins.** Verifiers care about the *current* canonical pubkey, not the history. The chain is retained for audit but isn't consulted during signature checks of dotpost messages — only "is the latest pubkey for this handle the one that signed?" matters.
+4. **Race safety.** If two rotations target the same `old_pubkey` and both verify, the OLDER one wins (first-valid-write across rotations too). The losing rotation has a stale `old_pubkey` and is ignored from then on.
 
 ---
 

@@ -27,8 +27,10 @@ Example usage:
 from .handles import (
     HandleClaim,
     HandleResolution,
+    HandleRotation,
     Contact,
     claim_handle,
+    rotate_handle,
     resolve_handle,
     add_contact,
     remove_contact,
@@ -40,8 +42,10 @@ from .handles import (
 __all__ = [
     "HandleClaim",
     "HandleResolution",
+    "HandleRotation",
     "Contact",
     "claim_handle",
+    "rotate_handle",
     "resolve_handle",
     "add_contact",
     "remove_contact",

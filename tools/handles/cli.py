@@ -20,6 +20,7 @@ import sys
 
 from handles import (
     claim_handle,
+    rotate_handle,
     resolve_handle,
     add_contact,
     remove_contact,
@@ -41,6 +42,25 @@ def cmd_claim(args):
         print(f"  claimed_at: {result.claimed_at}")
     except Exception as e:
         print(f"✗ Failed to claim: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_rotate(args):
+    """Rotate the keypair behind an existing handle."""
+    try:
+        result = rotate_handle(
+            args.handle,
+            new_privkey_hex=args.new_privkey,
+            old_privkey_hex=args.old_privkey,
+            reason=args.reason,
+        )
+        print(f"✓ Rotated {result.handle}")
+        print(f"  old pubkey: {result.old_pubkey}")
+        print(f"  new pubkey: {result.new_pubkey}")
+        print(f"  rotate_id:  {result.rotate_id}")
+        print(f"  rotated_at: {result.rotated_at}")
+    except Exception as e:
+        print(f"✗ Failed to rotate: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -147,6 +167,16 @@ Examples:
     claim_parser.add_argument("--handle", required=True, help="Handle to claim")
     claim_parser.add_argument("--note", help="Optional public note")
     claim_parser.set_defaults(func=cmd_claim)
+
+    # rotate
+    rotate_parser = subparsers.add_parser("rotate", help="Rotate the keypair behind an existing handle")
+    rotate_parser.add_argument("--handle", required=True, help="Handle being rotated")
+    rotate_parser.add_argument("--new-privkey", required=True,
+                                help="64-char hex seed of the NEW keypair (taking over)")
+    rotate_parser.add_argument("--old-privkey",
+                                help="64-char hex seed of the OLD keypair (defaults to PIPERNET_OLD_PRIVKEY env or load_or_generate)")
+    rotate_parser.add_argument("--reason", help="Optional public note explaining the rotation")
+    rotate_parser.set_defaults(func=cmd_rotate)
 
     # resolve
     resolve_parser = subparsers.add_parser("resolve", help="Resolve a handle")
