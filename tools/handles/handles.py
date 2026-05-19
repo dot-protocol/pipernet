@@ -166,15 +166,33 @@ def claim_handle(handle: str, note: str = None) -> HandleClaim:
         f"from:{handle}",
     ]
 
-    statement = f"[handle_claim] {handle} → {pubkey_b64[:16]}…"
+    # Include full pubkey + note so vector-dedup doesn't false-positive against other claims.
+    statement = (
+        f"[handle_claim] {handle} → {pubkey_b64}\n"
+        f"claimed_at: {now_iso}\n"
+        f"note: {note or '(no note)'}"
+    )
 
     try:
         result = tool_call("oracle_ingest", {
-            "channel": "raw",
-            "tags": tags,
-            "statement": statement,
+            "source": "pipernet-handle-claim",
+            "extracted": {
+                "items": [{
+                    "content": statement,
+                    "type": "handle_claim",
+                    "channel": "raw",
+                    "tags": tags,
+                }]
+            },
         })
+        # Oracle MCP returns either {obs_id} (newer) or {text: "...IDs: OBS-..."} (legacy)
         obs_id = result.get("obs_id") or result.get("id")
+        if not obs_id:
+            text = result.get("text", "")
+            for line in text.splitlines():
+                if line.startswith("IDs:"):
+                    obs_id = line.split("IDs:", 1)[1].strip().split(",")[0].strip()
+                    break
         if not obs_id:
             raise RuntimeError(f"oracle ingest failed: no obs_id in response {result}")
     except Exception as e:
@@ -347,11 +365,23 @@ def add_contact(contact_handle: str, alias: str = None, tags: list[str] = None) 
 
     try:
         result = tool_call("oracle_ingest", {
-            "channel": "raw",
-            "tags": tags_list,
-            "statement": statement,
+            "source": "pipernet-handle-contact",
+            "extracted": {
+                "items": [{
+                    "content": statement,
+                    "type": "contact_add",
+                    "channel": "raw",
+                    "tags": tags_list,
+                }]
+            },
         })
         obs_id = result.get("obs_id") or result.get("id")
+        if not obs_id:
+            text = result.get("text", "")
+            for line in text.splitlines():
+                if line.startswith("IDs:"):
+                    obs_id = line.split("IDs:", 1)[1].strip().split(",")[0].strip()
+                    break
         if not obs_id:
             raise RuntimeError(f"oracle ingest failed: no obs_id in response {result}")
     except Exception as e:
@@ -412,11 +442,23 @@ def remove_contact(contact_handle: str, reason: str = None) -> str:
 
     try:
         result = tool_call("oracle_ingest", {
-            "channel": "raw",
-            "tags": tags_list,
-            "statement": statement,
+            "source": "pipernet-handle-contact-remove",
+            "extracted": {
+                "items": [{
+                    "content": statement,
+                    "type": "contact_remove",
+                    "channel": "raw",
+                    "tags": tags_list,
+                }]
+            },
         })
         obs_id = result.get("obs_id") or result.get("id")
+        if not obs_id:
+            text = result.get("text", "")
+            for line in text.splitlines():
+                if line.startswith("IDs:"):
+                    obs_id = line.split("IDs:", 1)[1].strip().split(",")[0].strip()
+                    break
         if not obs_id:
             raise RuntimeError(f"oracle ingest failed: no obs_id in response {result}")
     except Exception as e:
