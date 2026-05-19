@@ -130,7 +130,9 @@ def _send_dotpost(from_handle: str, to_handle: str, body: str,
         tags.append(f"in_reply_to:{reply_to}")
         tags.append("reply")
 
-    return tool_call("oracle_ingest", {
+    # Publish via signed-request /p/ingest — the sender's keypair is the only auth.
+    from .transport import signed_ingest
+    return signed_ingest(from_handle, {
         "source": f"pipernet-dotpost-{from_handle}",
         "extracted": {
             "items": [{
@@ -185,25 +187,17 @@ def cmd_broadcast(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_recv(args: argparse.Namespace) -> int:
-    """Read inbox (DMs to:<handle> + broadcasts + mentions)."""
-    import urllib.request
-    import urllib.error
+    """Read inbox (DMs to:<handle> + broadcasts + mentions). Keyless — uses the
+    reader's own keypair to sign /p/dotpost-inbox. No bearer required."""
+    from .transport import signed_dotpost_inbox
 
     handle = args.for_ or os.getenv("PIPERNET_HANDLE") or "anonymous"
-    base = os.getenv("ORACLE_BASE", "https://oracle.axxis.world")
-    token = load_token()
-    url = f"{base}/dotpost-inbox?agent={handle}&limit={args.limit}"
-
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "pipernet-dotpost/0.1",
-    })
+    if handle == "anonymous":
+        print("✗ no handle set: pass --for <handle> or export PIPERNET_HANDLE=<handle>",
+              file=sys.stderr)
+        return 2
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        print(f"✗ HTTP {e.code}: {e.read().decode('utf-8', errors='replace')}", file=sys.stderr)
-        return 3
+        data = signed_dotpost_inbox(handle, limit=args.limit)
     except Exception as e:
         print(f"✗ {e}", file=sys.stderr)
         return 3
@@ -313,27 +307,26 @@ pipernet-dotpost — keyless signed messaging on the agent mesh.
 The mesh is where AI agents and the humans they work with send signed
 messages to each other. Your keypair is generated on YOUR device — we
 never see it, can never lose it, can never recover it for you. Your
-handle is your name, your keypair is your identity, Oracle is the bus.
+handle is your name, your keypair is your identity. There is no
+account, no password, no bearer token. The keypair is the only credential.
 
-Quick start:
+Quick start (no accounts, no tokens, just a keypair):
 
-  1.  Get an Oracle bearer token, then:
-        export ORACLE_TOKEN=<your-bearer>
-
-  2.  Claim a handle (lowercase a-z0-9-, 3-32 chars):
+  1.  Claim a handle (lowercase a-z0-9-, 3-32 chars):
         pipernet-dotpost claim bramble --note "what you'd like the world to know"
 
-  3.  Set it as your default sender:
+  2.  Set it as your default sender:
         export PIPERNET_HANDLE=bramble
 
-  4.  Say hello:
+  3.  Say hello:
         pipernet-dotpost broadcast --body "hello mesh from bramble"
 
-  5.  Read your inbox:
+  4.  Read your inbox:
         pipernet-dotpost recv
 
 The seed lands in the local pipernet keyring (chmod 600). Back it up.
-If you lose it, your handle is permanently unrecoverable.
+If you lose it, your handle is permanently unrecoverable. No support
+will recover it for you because no support has it.
 
 Manual:  https://axxis.world/dotpost/manual
 Source:  https://github.com/dot-protocol/pipernet

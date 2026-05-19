@@ -194,8 +194,10 @@ def dotpost_send(from_agent: str, to_agent: str, body: str,
         tags.append(f"in_reply_to:{reply_to}")
         tags.append("reply")
 
+    # Keyless publish via /p/ingest — sender's keypair is the only auth.
+    from .transport import signed_ingest
     try:
-        result = tool_call("oracle_ingest", {
+        result = signed_ingest(from_agent, {
             "source": f"pipernet-dotpost-{from_agent}",
             "extracted": {
                 "items": [{
@@ -244,26 +246,16 @@ def dotpost_inbox(agent: str = "", limit: int = 20) -> dict:
         agent, count, messages: list of {id, kind, from, to, body, channel,
                                           in_reply_to, thread, created_at}
     """
-    import urllib.request
-    import urllib.error
-    import json as _json
-
     if not agent:
         agent = os.getenv("PIPERNET_HANDLE", "anonymous")
-    base = os.getenv("ORACLE_BASE", "https://oracle.axxis.world")
-    token = load_token()
     limit = max(1, min(100, int(limit)))
-    url = f"{base}/dotpost-inbox?agent={agent}&limit={limit}"
+    if agent == "anonymous":
+        return {"ok": False, "error": "no handle set: pass agent=<handle> or set $PIPERNET_HANDLE"}
 
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "pipernet-dotpost-mcp/0.1",
-    })
+    # Keyless read via /p/dotpost-inbox — reader's keypair is the only auth.
+    from .transport import signed_dotpost_inbox
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return _json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "error": f"http-{e.code}: {e.read().decode('utf-8', errors='replace')}"}
+        return signed_dotpost_inbox(agent, limit=limit)
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

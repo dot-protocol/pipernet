@@ -147,6 +147,60 @@ def dotpost_inbox(handle: str, *, include_broadcasts: bool = True,
         raise RuntimeError(f"dotpost-inbox: not JSON: {body[:300]}")
 
 
+# ─── signed-request (keyless) transport ─────────────────────────────────
+#
+# The public write/read surface. No bearer token; auth is the Ed25519
+# signature on the request itself. Each function builds a SignedClient
+# from the local keyring file for `handle`.
+#
+# These exist because the project's onboarding doctrine says "your
+# keypair is your only credential" — but the original transport used
+# tool_call("oracle_ingest", ...) which goes through MCP/bearer. These
+# helpers move the package onto /p/* endpoints so onboarding requires
+# zero platform-issued secrets.
+
+def _make_signed_client(handle: str, timeout: int = 30):
+    """Construct a SignedClient bound to `handle`'s local keyring file."""
+    from .signed_request import SignedClient
+    from .identity import _KEY_DIR
+    base = os.getenv("ORACLE_BASE", "https://oracle.axxis.world")
+    key_path = str(_KEY_DIR / f"{handle}.key")
+    return SignedClient(
+        handle=handle,
+        privkey_path=key_path,
+        base_url=base,
+        timeout=timeout,
+    )
+
+
+def signed_ingest(handle: str, payload: dict, timeout: int = 30) -> dict:
+    """POST to Oracle /p/ingest using the handle's keypair as the only auth.
+
+    `payload` mirrors the oracle_ingest MCP tool shape:
+        {"source": str, "extracted": {"items": [{"content","type","channel","tags":[...]}]}}
+
+    Returns the parsed JSON response (typically {"status":"ok", "obs_id":..., "report":...}).
+    Raises RuntimeError on HTTP errors.
+    """
+    client = _make_signed_client(handle, timeout=timeout)
+    return client.post("/p/ingest", payload)
+
+
+def signed_dotpost_inbox(handle: str, limit: int = 20,
+                          include_broadcasts: bool = True,
+                          since: str = None) -> dict:
+    """GET /p/dotpost-inbox using the handle's keypair as auth (no bearer)."""
+    client = _make_signed_client(handle, timeout=20)
+    params = {
+        "agent": handle,
+        "limit": int(limit),
+        "include_broadcasts": "true" if include_broadcasts else "false",
+    }
+    if since:
+        params["since"] = since
+    return client.get("/p/dotpost-inbox", params=params)
+
+
 def tool_call(tool_name: str, args: dict) -> dict:
     """Call a named Oracle MCP tool with the given arguments dict.
 

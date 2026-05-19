@@ -67,37 +67,28 @@ def _validate_handle(handle: str) -> str:
     return original
 
 
-def _already_claimed(handle: str) -> Optional[dict]:
+def _already_claimed(handle: str, signing_handle: str = None) -> Optional[dict]:
     """Check Oracle for any existing claim on this handle.
 
-    Uses Oracle REST /find directly (resolve_handle's oracle_audit path is
-    currently broken — different response shape than expected).
+    Uses signed-request /p/find — no bearer token required. We sign the
+    request with the LOCAL keypair for `signing_handle` (default: the
+    handle being checked, which works because the caller has just
+    generated it via load_or_generate).
 
     Returns:
-        {"obs_id": str, "pubkey_hex": str} of the earliest hit, or None if
-        no claim exists. Returns None on network errors (fail-open — we
-        don't want a flaky Oracle to block legitimate claims).
+        {"obs_id": str, "pubkey_hex": str} of the earliest hit, or None
+        if no claim exists. Fails open (returns None) on network errors
+        so a flaky Oracle doesn't block legitimate claims.
     """
     try:
-        import urllib.request, urllib.error
-        from .transport import load_token, ORACLE_BASE
-
-        body = json.dumps({"q": f"handle_claim:{handle}", "limit": 5}).encode()
-        req = urllib.request.Request(
-            f"{ORACLE_BASE.rstrip('/')}/find",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {load_token()}",
-                "Content-Type": "application/json",
-                "User-Agent": "pipernet-dotpost/0.1",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
+        from .transport import _make_signed_client
+        sig_handle = signing_handle or handle
+        client = _make_signed_client(sig_handle, timeout=10)
+        data = client.post("/p/find", {"q": f"handle_claim:{handle}", "limit": 5})
         hits = data.get("hits", [])
         if not hits:
             return None
-        # Earliest-by-created_at wins per first-valid-write semantics.
+        # First-valid-write: earliest created_at wins.
         hits_sorted = sorted(hits, key=lambda h: h.get("created_at", ""))
         first = hits_sorted[0]
         pubkey = None
@@ -197,32 +188,36 @@ def claim_handle(handle: str, note: str = None) -> HandleClaim:
     """
     handle = _validate_handle(handle)
 
-    # Pre-flight: refuse if the handle is already claimed by a DIFFERENT pubkey.
-    # If we have a local seed for this handle and its pubkey matches the existing
-    # claim, treat as an idempotent retry (e.g. recovering from a network blip)
-    # and proceed. Otherwise refuse — we won't pollute Oracle with a competing
-    # claim that the resolver would correctly ignore but that humans would
-    # see in the audit log and find confusing.
-    existing = _already_claimed(handle)
+    # Load or generate keypair FIRST so we have a signing identity for the
+    # availability check + the publish call. SignedClient picks up the PEM
+    # from the keyring (~/$PIPERNET_HOME/<handle>.key).
+    priv, pubkey_bytes, generated = load_or_generate(handle)
+    pubkey_b64 = pubkey_hex(pubkey_bytes)
+    pubkey_str = f"ed25519:{pubkey_b64}"
+
+    # Pre-flight: refuse if the handle is already claimed by a DIFFERENT
+    # pubkey. The check itself is signed by this keypair — keyless all
+    # the way down. If the existing claim is ours (idempotent retry, e.g.
+    # recovering from a network blip), fall through.
+    existing = _already_claimed(handle, signing_handle=handle)
     if existing and existing.get("pubkey_hex"):
-        from .identity import load_pubkey
-        local_pub = load_pubkey(handle)
-        local_hex = local_pub.hex() if local_pub else None
-        if local_hex != existing["pubkey_hex"]:
+        if existing["pubkey_hex"].lower() != pubkey_b64.lower():
+            # Someone else already claimed this handle. Roll back the key
+            # we just generated so we don't pollute the keyring with an
+            # orphan that the user might mistake for their own.
+            if generated:
+                try:
+                    from .identity import _KEY_DIR
+                    (_KEY_DIR / f"{handle}.key").unlink(missing_ok=True)
+                except Exception:
+                    pass
             short = existing["pubkey_hex"][:16]
             raise ValueError(
                 f"handle-already-claimed: '{handle}' is already claimed by "
                 f"ed25519:{short}... ({existing['obs_id']}). "
-                f"Pick a different handle. If this IS your handle, place your "
-                f"seed in the local keyring for this handle before retrying."
+                f"Pick a different handle."
             )
-        # Local seed matches the on-chain claim — idempotent retry, fall through.
         logger.info(f"handle '{handle}' already claimed by local pubkey, retry will be idempotent")
-
-    # Load or generate keypair for this handle.
-    priv, pubkey_bytes, generated = load_or_generate(handle)
-    pubkey_b64 = pubkey_hex(pubkey_bytes)
-    pubkey_str = f"ed25519:{pubkey_b64}"
 
     # Build canonical claim object.
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -260,8 +255,12 @@ def claim_handle(handle: str, note: str = None) -> HandleClaim:
         f"note: {note or '(no note)'}"
     )
 
+    # Publish via signed-request /p/ingest — NO bearer token. The keypair
+    # we just used to sign the request IS the only credential. The server
+    # verifies the embedded handle_pubkey tag matches the request signer.
     try:
-        result = tool_call("oracle_ingest", {
+        from .transport import signed_ingest
+        result = signed_ingest(handle, {
             "source": "pipernet-handle-claim",
             "extracted": {
                 "items": [{
@@ -272,18 +271,18 @@ def claim_handle(handle: str, note: str = None) -> HandleClaim:
                 }]
             },
         })
-        # Oracle MCP returns either {obs_id} (newer) or {text: "...IDs: OBS-..."} (legacy)
         obs_id = result.get("obs_id") or result.get("id")
         if not obs_id:
-            text = result.get("text", "")
-            for line in text.splitlines():
+            # Fallback: parse from report text (some pipelines include it there).
+            report = result.get("report") or result.get("text") or ""
+            for line in report.splitlines():
                 if line.startswith("IDs:"):
                     obs_id = line.split("IDs:", 1)[1].strip().split(",")[0].strip()
                     break
         if not obs_id:
-            raise RuntimeError(f"oracle ingest failed: no obs_id in response {result}")
+            raise RuntimeError(f"p/ingest returned no obs_id: {result}")
     except Exception as e:
-        logger.error(f"oracle_ingest failed: {e}")
+        logger.error(f"signed claim publish failed: {e}")
         raise RuntimeError(f"Failed to ingest handle claim: {e}")
 
     return HandleClaim(
@@ -392,8 +391,15 @@ def rotate_handle(
         f"validate both signatures and advance the chain forward."
     )
 
+    # Publish via /p/ingest signed by the NEW keypair (no bearer). The new
+    # key proves control by signing the request; the embedded double-sig
+    # (old+new over canonical rotation bytes) proves rotation authority.
+    # NEW seed isn't on disk yet, so we build the SignedClient inline.
     try:
-        result = tool_call("oracle_ingest", {
+        from .signed_request import SignedClient
+        oracle_base = os.getenv("ORACLE_BASE", "https://oracle.axxis.world")
+        client = SignedClient.from_seed_hex(handle, new_privkey_hex, oracle_base, timeout=30)
+        result = client.post("/p/ingest", {
             "source": "pipernet-handle-rotate",
             "extracted": {
                 "items": [{
@@ -406,15 +412,15 @@ def rotate_handle(
         })
         obs_id = result.get("obs_id") or result.get("id")
         if not obs_id:
-            text = result.get("text", "")
-            for line in text.splitlines():
+            report = result.get("report") or result.get("text") or ""
+            for line in report.splitlines():
                 if line.startswith("IDs:"):
                     obs_id = line.split("IDs:", 1)[1].strip().split(",")[0].strip()
                     break
         if not obs_id:
-            raise RuntimeError(f"oracle ingest failed: no obs_id in response {result}")
+            raise RuntimeError(f"p/ingest returned no obs_id: {result}")
     except Exception as e:
-        logger.error(f"oracle_ingest failed: {e}")
+        logger.error(f"signed rotation publish failed: {e}")
         raise RuntimeError(f"Failed to ingest handle rotation: {e}")
 
     return HandleRotation(

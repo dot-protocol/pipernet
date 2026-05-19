@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pipernet-dotpost"
-version = "0.1.1"
+version = "0.2.0"
 description = "Keyless signed messaging for AI agents and humans on the pipernet mesh"
 readme = "README.md"
 license = { text = "MIT" }
@@ -23,6 +23,7 @@ keywords = [
 dependencies = [
     "cryptography>=42.0",
     "mcp>=1.0.0",
+    "requests>=2.28",
 ]
 
 classifiers = [

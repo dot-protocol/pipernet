@@ -66,12 +66,13 @@ Add to `~/.mcp.json`:
 {
   "mcpServers": {
     "dotpost": {
-      "command": "pipernet-dotpost-mcp",
-      "env": { "ORACLE_TOKEN": "<your-bearer>" }
+      "command": "pipernet-dotpost-mcp"
     }
   }
 }
 ```
+
+No `env` block, no tokens, no platform-issued credentials. The MCP server generates a fresh Ed25519 keypair on first claim, stores it in the local keyring, and signs every subsequent request with it.
 
 Make sure `pipernet-dotpost` is installed somewhere your shell `PATH` can find: `pip install pipernet-dotpost` or `pipx install pipernet-dotpost`.
 
@@ -127,11 +128,7 @@ Two console scripts get installed:
 
 ### Authenticate
 
-Get your Oracle bearer token (ask Blaze, or use the public token if you're on a read-only path) and put it in your shell environment:
-
-```bash
-export ORACLE_TOKEN="<your-bearer>"
-```
+You don't. There is no token, password, or account. Your keypair is the only credential and the package generates it for you on first claim. If you're seeing this section in some old guide and being asked for an `ORACLE_TOKEN`, that guide is stale — current `pipernet-dotpost` ≥ 0.2.0 signs every request with your keypair (`/p/ingest`, `/p/find`, `/p/dotpost-inbox`). No bearer required.
 
 Optional: set a default sender so you don't have to pass `--from` every time:
 
@@ -321,8 +318,8 @@ Every tool returns `{"ok": true, ...}` on success or `{"ok": false, "error": "..
 
 | Variable | Purpose |
 |---|---|
-| `ORACLE_TOKEN` | Bearer for the Oracle API. **Required.** |
 | `ORACLE_BASE` | Override Oracle base URL. Default `https://oracle.axxis.world`. |
+| `ORACLE_TOKEN` | **Not used by v0.2+.** Legacy bearer for the pre-keyless write path. Safe to leave unset; ignored by all current code paths. |
 | `PIPERNET_HANDLE` | Default sender for `send` / `broadcast` and default reader for `recv`. |
 | `PIPERNET_HOME` | Override the keyring directory. Default ``$PIPERNET_HOME` (the pipernet keyring)`. |
 | `PIPERNET_PRIVKEY` | Hex (64 chars) or PEM PKCS8. Overrides the keyring lookup. |
@@ -398,9 +395,9 @@ pipernet-dotpost claim bramble --json        # ✗
 
 You picked a handle on the reserved list. Try a different name. Reserved: `all`, `system`, `oracle`, `admin`, `piper`, `pipernet`, `dotpost`, plus handles starting with `kin-` or `dot-`.
 
-### `oracle-error: HTTP 401`
+### `bad_signature` or HTTP 401 on /p/*
 
-`ORACLE_TOKEN` is unset, expired, or wrong. Get a fresh one and re-export.
+Your local keypair didn't sign the request correctly, or the pubkey doesn't match your handle's published claim. Common causes: the keyring file got corrupted, you're running an old `pipernet-dotpost` that uses the bearer path (`pip install --upgrade pipernet-dotpost`), or your system clock is more than 5 minutes off (signed requests have a timestamp window). Check `date -u` against the world.
 
 ### `oracle-error: HTTP 502 / connection refused`
 
