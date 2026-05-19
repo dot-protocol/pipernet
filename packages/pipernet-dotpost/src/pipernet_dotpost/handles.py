@@ -46,13 +46,69 @@ RESERVED_HANDLES = {
 
 
 def _validate_handle(handle: str) -> str:
-    """Normalize and validate a handle. Raises ValueError on invalid format."""
-    handle = handle.strip().lower()
-    if not HANDLE_REGEX.match(handle):
-        raise ValueError(f"invalid-handle-format: {handle}")
-    if handle in RESERVED_HANDLES or handle.startswith(("kin-", "dot-")):
-        raise ValueError(f"reserved-handle: {handle}")
-    return handle
+    """Normalize and validate a handle. Raises ValueError on invalid format.
+
+    Mixed-case input is REJECTED (not silently lowercased) because users who
+    typed `Bramble` thinking they'd own `Bramble` would otherwise be told
+    they claimed `bramble` without warning — an onboarding footgun.
+    """
+    original = handle.strip()
+    if not original:
+        raise ValueError("invalid-handle-empty")
+    if original != original.lower():
+        raise ValueError(
+            f"invalid-handle-case: handles are lowercase only — "
+            f"did you mean '{original.lower()}'?"
+        )
+    if not HANDLE_REGEX.match(original):
+        raise ValueError(f"invalid-handle-format: {original}")
+    if original in RESERVED_HANDLES or original.startswith(("kin-", "dot-")):
+        raise ValueError(f"reserved-handle: {original}")
+    return original
+
+
+def _already_claimed(handle: str) -> Optional[dict]:
+    """Check Oracle for any existing claim on this handle.
+
+    Uses Oracle REST /find directly (resolve_handle's oracle_audit path is
+    currently broken — different response shape than expected).
+
+    Returns:
+        {"obs_id": str, "pubkey_hex": str} of the earliest hit, or None if
+        no claim exists. Returns None on network errors (fail-open — we
+        don't want a flaky Oracle to block legitimate claims).
+    """
+    try:
+        import urllib.request, urllib.error
+        from .transport import load_token, ORACLE_BASE
+
+        body = json.dumps({"q": f"handle_claim:{handle}", "limit": 5}).encode()
+        req = urllib.request.Request(
+            f"{ORACLE_BASE.rstrip('/')}/find",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {load_token()}",
+                "Content-Type": "application/json",
+                "User-Agent": "pipernet-dotpost/0.1",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        hits = data.get("hits", [])
+        if not hits:
+            return None
+        # Earliest-by-created_at wins per first-valid-write semantics.
+        hits_sorted = sorted(hits, key=lambda h: h.get("created_at", ""))
+        first = hits_sorted[0]
+        pubkey = None
+        for t in first.get("tags", []):
+            if t.startswith("handle_pubkey:"):
+                pubkey = t[len("handle_pubkey:"):]
+                break
+        return {"obs_id": first.get("id"), "pubkey_hex": pubkey}
+    except Exception as e:
+        logger.warning(f"availability check failed: {e}; proceeding optimistically")
+        return None
 
 
 def _base64url_encode(data: bytes) -> str:
@@ -140,6 +196,28 @@ def claim_handle(handle: str, note: str = None) -> HandleClaim:
         RuntimeError: If Oracle ingest fails.
     """
     handle = _validate_handle(handle)
+
+    # Pre-flight: refuse if the handle is already claimed by a DIFFERENT pubkey.
+    # If we have a local seed for this handle and its pubkey matches the existing
+    # claim, treat as an idempotent retry (e.g. recovering from a network blip)
+    # and proceed. Otherwise refuse — we won't pollute Oracle with a competing
+    # claim that the resolver would correctly ignore but that humans would
+    # see in the audit log and find confusing.
+    existing = _already_claimed(handle)
+    if existing and existing.get("pubkey_hex"):
+        from .identity import load_pubkey
+        local_pub = load_pubkey(handle)
+        local_hex = local_pub.hex() if local_pub else None
+        if local_hex != existing["pubkey_hex"]:
+            short = existing["pubkey_hex"][:16]
+            raise ValueError(
+                f"handle-already-claimed: '{handle}' is already claimed by "
+                f"ed25519:{short}... ({existing['obs_id']}). "
+                f"Pick a different handle. If this IS your handle, place your "
+                f"seed in the local keyring for this handle before retrying."
+            )
+        # Local seed matches the on-chain claim — idempotent retry, fall through.
+        logger.info(f"handle '{handle}' already claimed by local pubkey, retry will be idempotent")
 
     # Load or generate keypair for this handle.
     priv, pubkey_bytes, generated = load_or_generate(handle)
