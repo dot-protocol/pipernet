@@ -14,14 +14,19 @@ Zero dependency beyond `cryptography` + `requests` + `urllib` (all stdlib-adjace
 from __future__ import annotations
 
 import base64
+import email.utils
 import hashlib
+import logging
 import os
 import secrets
-from datetime import datetime, timezone
+import urllib.request
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
+
+_log = logging.getLogger(__name__)
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -97,9 +102,63 @@ class SignedClient:
         self.generated = False
         return self
 
+    # Process-wide cache: offset (server_time - local_time) in seconds.
+    # Set on first sign attempt when PIPERNET_TIME_SYNC_URL is configured.
+    _time_offset: "timedelta | None" = None
+
+    @classmethod
+    def _resolve_time_offset(cls) -> timedelta:
+        """Return the local-clock offset to use when stamping signed requests.
+
+        If PIPERNET_TIME_SYNC_URL env var is set, fetch that URL once
+        per process and use its HTTP `Date:` header (RFC 7231 mandates
+        every response carries one). This lets clients on machines with
+        broken/disabled NTP still sign within the server's 300s window
+        without touching the system clock.
+
+        If the env var is unset or the fetch fails, returns zero offset
+        and the client falls back to the local clock — same as before.
+        """
+        if cls._time_offset is not None:
+            return cls._time_offset
+
+        sync_url = os.environ.get("PIPERNET_TIME_SYNC_URL", "").strip()
+        if not sync_url:
+            cls._time_offset = timedelta(0)
+            return cls._time_offset
+
+        try:
+            req = urllib.request.Request(
+                sync_url,
+                headers={"User-Agent": "pipernet-dotpost-clock-sync/0.2"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                date_hdr = r.headers.get("Date")
+            if not date_hdr:
+                raise RuntimeError(f"no Date header from {sync_url}")
+            server_dt = email.utils.parsedate_to_datetime(date_hdr)
+            local_dt = datetime.now(timezone.utc)
+            offset = server_dt - local_dt
+            cls._time_offset = offset
+            if abs(offset.total_seconds()) > 60:
+                _log.info(
+                    "PIPERNET_TIME_SYNC: applying %+.0fs offset (local clock drift)",
+                    offset.total_seconds(),
+                )
+            return offset
+        except Exception as e:
+            _log.warning("PIPERNET_TIME_SYNC fetch failed (%s); using local clock", e)
+            cls._time_offset = timedelta(0)
+            return cls._time_offset
+
     def _sign_headers(self, method: str, path: str, qs: str, body_bytes: bytes) -> dict:
         body_hash = hashlib.sha256(body_bytes).hexdigest()
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Use server-synced time if PIPERNET_TIME_SYNC_URL is set (cached
+        # offset). Falls back to local clock if not configured or fetch
+        # failed. Replay window on the server is 300s.
+        offset = self._resolve_time_offset()
+        ts = (datetime.now(timezone.utc) + offset).strftime("%Y-%m-%dT%H:%M:%SZ")
         nonce_b64 = base64.b64encode(secrets.token_bytes(24)).decode("ascii")
         canonical = b"\n".join([
             SIG_DOMAIN,

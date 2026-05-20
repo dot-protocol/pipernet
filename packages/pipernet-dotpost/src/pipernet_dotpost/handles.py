@@ -84,8 +84,13 @@ def _already_claimed(handle: str, signing_handle: str = None) -> Optional[dict]:
         from .transport import _make_signed_client
         sig_handle = signing_handle or handle
         client = _make_signed_client(sig_handle, timeout=10)
-        data = client.post("/p/find", {"q": f"handle_claim:{handle}", "limit": 5})
+        data = client.post("/p/find", {"q": f"handle_claim:{handle}", "limit": 10})
         hits = data.get("hits", [])
+        # /find is CONTAINS-only and false-positives on substrings —
+        # querying "handle_claim:ultron" matches "handle_claim:ultronx360".
+        # Filter to hits whose handle_claim tag matches EXACTLY.
+        target_tag = f"handle_claim:{handle}"
+        hits = [h for h in hits if target_tag in (h.get("tags") or [])]
         if not hits:
             return None
         # First-valid-write: earliest created_at wins.
