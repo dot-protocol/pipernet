@@ -20,8 +20,12 @@ def _send_group_dotpost(
     group_name: str,
     body: str,
     reply_to: str | None = None,
+    channel: str = "axxis",
 ) -> dict:
-    """Write one group dotpost observation. Returns the Oracle ingest response."""
+    """Write one group dotpost observation. Returns the Oracle ingest response.
+
+    `channel` is set at payload root (CLAUDE.md Rule 8, set 2026-05-23).
+    """
     tags = build_group_tags(sender, group_name, reply_to=reply_to)
     rationale = f"DOTpost group message from {sender} to group:{group_name}"
     if reply_to:
@@ -29,6 +33,7 @@ def _send_group_dotpost(
 
     payload = {
         "source": f"pipernet-mesh-{sender}",
+        "channel": channel,
         "extracted": {
             "items": [
                 {
@@ -42,7 +47,7 @@ def _send_group_dotpost(
         },
     }
     suffix = f" reply→{reply_to}" if reply_to else ""
-    print(f"{sender}@mesh → group:{group_name}{suffix} ({len(body)} chars)", file=sys.stderr)
+    print(f"{sender}@mesh → group:{group_name}{suffix} ({len(body)} chars, ch:{channel})", file=sys.stderr)
     return tool_call("oracle_ingest", payload)
 
 
@@ -54,6 +59,7 @@ def cmd_group(args: argparse.Namespace) -> int:
     """
     sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
     reply_to = getattr(args, "reply_to", None)
+    channel = getattr(args, "channel", None) or os.getenv("DOTPOST_CHANNEL", "axxis")
     group_names_raw = [g.strip() for g in args.to.split(",") if g.strip()]
     try:
         group_names = [validate_group_name(g) for g in group_names_raw]
@@ -65,7 +71,7 @@ def cmd_group(args: argparse.Namespace) -> int:
         return 1
     results = []
     for group_name in group_names:
-        result = _send_group_dotpost(sender, group_name, args.body, reply_to)
+        result = _send_group_dotpost(sender, group_name, args.body, reply_to, channel)
         results.append(result)
     print(json.dumps(results if len(results) > 1 else results[0], indent=2))
     return 0

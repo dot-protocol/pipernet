@@ -20,8 +20,13 @@ def _send_dotpost(
     recipient: str,
     body: str,
     reply_to: str | None = None,
+    channel: str = "axxis",
 ) -> dict:
     """Write a DM or broadcast dotpost observation to Oracle.
+
+    `channel` is set at PAYLOAD ROOT (CLAUDE.md Rule 8, set 2026-05-23).
+    Default 'axxis' — never let observations silently land on channel:raw
+    where /search excludes them by default.
 
     Returns the raw Oracle ingest response dict.
     """
@@ -36,6 +41,7 @@ def _send_dotpost(
 
     payload = {
         "source": f"pipernet-mesh-{sender}",
+        "channel": channel,
         "extracted": {
             "items": [
                 {
@@ -50,7 +56,7 @@ def _send_dotpost(
     }
     arrow = "→ ALL" if is_broadcast else f"→ {recipient}"
     suffix = f" reply→{reply_to}" if reply_to else ""
-    print(f"{sender}@mesh {arrow}{suffix} ({len(body)} chars)", file=sys.stderr)
+    print(f"{sender}@mesh {arrow}{suffix} ({len(body)} chars, ch:{channel})", file=sys.stderr)
     return tool_call("oracle_ingest", payload)
 
 
@@ -59,10 +65,12 @@ def _send_group_dotpost(
     group_name: str,
     body: str,
     reply_to: str | None = None,
+    channel: str = "axxis",
 ) -> dict:
     """Write a group dotpost observation to Oracle.
 
     Tags written: to:group:<name>, group:<name>, dotpost, from:<sender>, mesh, group-post.
+    `channel` is set at payload root per CLAUDE.md Rule 8.
     Returns the raw Oracle ingest response dict.
     """
     tags = build_group_tags(sender, group_name, reply_to=reply_to)
@@ -72,6 +80,7 @@ def _send_group_dotpost(
 
     payload = {
         "source": f"pipernet-mesh-{sender}",
+        "channel": channel,
         "extracted": {
             "items": [
                 {
@@ -85,7 +94,7 @@ def _send_group_dotpost(
         },
     }
     suffix = f" reply→{reply_to}" if reply_to else ""
-    print(f"{sender}@mesh → group:{group_name}{suffix} ({len(body)} chars)", file=sys.stderr)
+    print(f"{sender}@mesh → group:{group_name}{suffix} ({len(body)} chars, ch:{channel})", file=sys.stderr)
     return tool_call("oracle_ingest", payload)
 
 
@@ -97,14 +106,15 @@ def cmd_send(args: argparse.Namespace) -> int:
     """
     sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
     reply_to = getattr(args, "reply_to", None)
+    channel = getattr(args, "channel", None) or os.getenv("DOTPOST_CHANNEL", "axxis")
     try:
         mode, value = parse_to_arg(args.to)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     if mode == "group":
-        result = _send_group_dotpost(sender, value, args.body, reply_to)
+        result = _send_group_dotpost(sender, value, args.body, reply_to, channel)
     else:
-        result = _send_dotpost(sender, args.to, args.body, reply_to)
+        result = _send_dotpost(sender, args.to, args.body, reply_to, channel)
     print(json.dumps(result, indent=2))
     return 0

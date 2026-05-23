@@ -22,6 +22,9 @@ def cmd_broadcast(args: argparse.Namespace) -> int:
     """
     sender = args.from_handle or os.getenv("PIPERNET_HANDLE", "rocky")
     reply_to = getattr(args, "reply_to", None)
+    # Rule 8 (CLAUDE.md, set 2026-05-23): channel set at PAYLOAD ROOT,
+    # never let observations land on channel:raw (excluded by /search default).
+    channel = getattr(args, "channel", None) or os.getenv("DOTPOST_CHANNEL", "axxis")
     tags = build_send_tags(sender, BROADCAST_HANDLE, reply_to=reply_to)
     rationale = f"DOTpost broadcast from {sender} to all mesh agents"
     if reply_to:
@@ -29,6 +32,7 @@ def cmd_broadcast(args: argparse.Namespace) -> int:
 
     payload = {
         "source": f"pipernet-mesh-{sender}",
+        "channel": channel,
         "extracted": {
             "items": [
                 {
@@ -42,7 +46,7 @@ def cmd_broadcast(args: argparse.Namespace) -> int:
         },
     }
     suffix = f" reply→{reply_to}" if reply_to else ""
-    print(f"{sender}@mesh → ALL{suffix} ({len(args.body)} chars)", file=sys.stderr)
+    print(f"{sender}@mesh → ALL{suffix} ({len(args.body)} chars, ch:{channel})", file=sys.stderr)
     result = tool_call("oracle_ingest", payload)
     print(json.dumps(result, indent=2))
     return 0

@@ -36,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="sender handle (default: $PIPERNET_HANDLE or rocky)")
     p_send.add_argument("--reply-to", dest="reply_to",
         help="thread under an OBS id (adds reply + in_reply_to:<id> tags)")
+    p_send.add_argument("--channel", default=None,
+        help="Oracle channel at payload root (default: axxis; env: DOTPOST_CHANNEL)")
     p_send.set_defaults(func=cmd_send)
 
     # broadcast
@@ -46,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="sender handle (default: $PIPERNET_HANDLE or rocky)")
     p_bc.add_argument("--reply-to", dest="reply_to",
         help="thread under an OBS id (adds reply + in_reply_to:<id> tags)")
+    p_bc.add_argument("--channel", default=None,
+        help="Oracle channel at payload root (default: axxis; env: DOTPOST_CHANNEL)")
     p_bc.set_defaults(func=cmd_broadcast)
 
     # group
@@ -57,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_grp.add_argument("--from", dest="from_handle",
         help="sender handle (default: $PIPERNET_HANDLE or rocky)")
     p_grp.add_argument("--reply-to", dest="reply_to", help="thread under an OBS id")
+    p_grp.add_argument("--channel", default=None,
+        help="Oracle channel at payload root (default: axxis; env: DOTPOST_CHANNEL)")
     p_grp.set_defaults(func=cmd_group)
 
     # recv
