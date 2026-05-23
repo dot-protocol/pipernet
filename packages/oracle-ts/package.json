@@ -1,0 +1,62 @@
+{
+  "name": "@pipernet/oracle",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Oracle — the Kin knowledge graph. Mem0-parity API with Ed25519 signed-request auth.",
+  "license": "Apache-2.0",
+  "author": "Kin / Piper (kin-1)",
+  "keywords": [
+    "oracle",
+    "axxis",
+    "pipernet",
+    "knowledge-graph",
+    "ed25519",
+    "mem0",
+    "rag"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsup --watch",
+    "pack": "npm run build && npm pack"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.1.0",
+    "@noble/hashes": "^1.4.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "tsup": "^8.0.2",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dot-protocol/oracle-sdk-ts"
+  }
+}
