@@ -1,7 +1,7 @@
 {
-  "name": "@pipernet/oracle",
-  "version": "0.1.0",
-  "description": "TypeScript SDK for Oracle — the Kin knowledge graph. Mem0-parity API with Ed25519 signed-request auth.",
+  "name": "@dotprotocol/oracle",
+  "version": "1.0.0",
+  "description": "TypeScript SDK for Oracle \u2014 the Kin knowledge graph. Mem0-parity API with Ed25519 signed-request auth.",
   "license": "Apache-2.0",
   "author": "Kin / Piper (kin-1)",
   "keywords": [
