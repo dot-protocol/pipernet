@@ -529,7 +529,7 @@ export class Oracle {
       path: req.path,
       queryString,
       bodyText,
-      contentType: req.body === undefined ? undefined : 'application/json',
+      ...(req.body !== undefined && { contentType: 'application/json' }),
       authMode: mode,
     });
 
