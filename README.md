@@ -1,3 +1,7 @@
+> **📦 Moved.** This now lives in **[`piedpiper/protocol/`](https://github.com/dot-protocol/piedpiper)** — folded into the `piedpiper` monorepo (full history preserved) in the 2026-07 consolidation. This repo is kept as a pointer; new work happens in `piedpiper`.
+
+---
+
 # pipernet
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
